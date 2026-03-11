@@ -9,6 +9,7 @@ import com.tonic.api.widgets.PrayerAPI;
 import com.tonic.data.EquipmentSlot;
 import com.tonic.data.wrappers.ItemEx;
 import com.tonic.util.VitaPlugin;
+import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.plugins.PluginDescriptor;
@@ -30,6 +31,9 @@ public class WeaponGearAutoEquipPlugin extends VitaPlugin
 {
     @Inject
     private WeaponGearAutoEquipConfig config;
+
+    @Inject
+    private Client client;
 
     private int lastWeaponId = -1;
     private int lastProcessedWeaponId = -1;
