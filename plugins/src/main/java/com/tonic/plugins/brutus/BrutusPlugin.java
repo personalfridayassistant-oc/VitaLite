@@ -17,6 +17,7 @@ import com.tonic.queries.NpcQuery;
 import com.tonic.queries.TileItemQuery;
 import com.tonic.queries.TileObjectQuery;
 import com.tonic.util.VitaPlugin;
+import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.api.Skill;
 import net.runelite.api.coords.WorldPoint;
@@ -37,6 +38,9 @@ public class BrutusPlugin extends VitaPlugin
 
     @Inject
     private BrutusConfig config;
+
+    @Inject
+    private Client client;
 
     @Provides
     BrutusConfig provideConfig(ConfigManager configManager)
