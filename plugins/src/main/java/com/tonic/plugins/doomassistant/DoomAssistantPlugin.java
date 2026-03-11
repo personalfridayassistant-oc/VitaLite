@@ -13,7 +13,7 @@ import com.tonic.queries.NpcQuery;
 import com.tonic.util.MessageUtil;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
-import net.runelite.api.LocalPoint;
+import net.runelite.api.coords.LocalPoint;
 import net.runelite.api.Projectile;
 import net.runelite.api.Skill;
 import net.runelite.api.coords.WorldPoint;
