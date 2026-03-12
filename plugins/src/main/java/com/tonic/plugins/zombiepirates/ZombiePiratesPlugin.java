@@ -30,6 +30,7 @@ import net.runelite.api.events.NpcDespawned;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.config.ConfigButtonClicked;
+import net.runelite.client.events.ConfigButtonClicked;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.overlay.OverlayManager;
