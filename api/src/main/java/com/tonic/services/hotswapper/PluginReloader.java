@@ -2,7 +2,6 @@ package com.tonic.services.hotswapper;
 
 import com.tonic.Logger;
 import com.tonic.Static;
-import com.tonic.util.ReflectBuilder;
 import lombok.Getter;
 import lombok.Setter;
 import net.runelite.client.plugins.Plugin;
@@ -11,6 +10,8 @@ import javax.swing.*;
 import java.awt.*;
 import java.io.File;
 import java.io.IOException;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.FileVisitOption;
@@ -137,16 +138,80 @@ public class PluginReloader {
                 return;
             }
 
-            ReflectBuilder.of(plugin)
-                    .field("pluginListPanelProvider")
-                    .method("get", null, null)
-                    .method("rebuildPluginList", null, null)
-                    .get();
+            Object provider = getFieldValue(plugin, "pluginListPanelProvider", "pluginListProvider");
+            if (provider == null)
+            {
+                return;
+            }
+
+            Object pluginListPanel = invokeNoArg(provider, "get");
+            if (pluginListPanel == null)
+            {
+                return;
+            }
+
+            if (!invokeFirstPresentNoArg(pluginListPanel,
+                    "rebuildPluginList",
+                    "rebuildPluginListPanel",
+                    "rebuild",
+                    "refresh"))
+            {
+                Logger.warn("Plugin list panel rebuild method not found; skipping UI refresh.");
+            }
         }
         catch (Exception e)
         {
             Logger.error("Failed to rebuild plugin list UI: " + e.getMessage());
         }
+    }
+
+    private static Object getFieldValue(Object target, String... fieldNames)
+    {
+        for (String fieldName : fieldNames)
+        {
+            try
+            {
+                Field f = target.getClass().getDeclaredField(fieldName);
+                f.setAccessible(true);
+                return f.get(target);
+            }
+            catch (Exception ignored)
+            {
+            }
+        }
+        return null;
+    }
+
+    private static Object invokeNoArg(Object target, String methodName)
+    {
+        try
+        {
+            Method method = target.getClass().getMethod(methodName);
+            method.setAccessible(true);
+            return method.invoke(target);
+        }
+        catch (Exception ignored)
+        {
+            return null;
+        }
+    }
+
+    private static boolean invokeFirstPresentNoArg(Object target, String... methodNames)
+    {
+        for (String methodName : methodNames)
+        {
+            try
+            {
+                Method method = target.getClass().getMethod(methodName);
+                method.setAccessible(true);
+                method.invoke(target);
+                return true;
+            }
+            catch (Exception ignored)
+            {
+            }
+        }
+        return false;
     }
 
     public static void addRedButtonAfterPin(JPanel pluginListItem, Plugin plugin) {
