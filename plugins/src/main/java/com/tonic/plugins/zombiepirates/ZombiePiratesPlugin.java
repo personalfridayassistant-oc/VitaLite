@@ -170,43 +170,6 @@ public class ZombiePiratesPlugin extends VitaPlugin
         }
     }
 
-    @Subscribe
-    private void onConfigButtonClicked(Object event)
-    {
-        if (event == null || !"ConfigButtonClicked".equals(event.getClass().getSimpleName()))
-        {
-            return;
-        }
-
-        String group;
-        String key;
-        try
-        {
-            group = (String) event.getClass().getMethod("getGroup").invoke(event);
-            key = (String) event.getClass().getMethod("getKey").invoke(event);
-        }
-        catch (Exception ignored)
-        {
-            return;
-        }
-
-        if (!CONFIG_GROUP.equals(group))
-        {
-            return;
-        }
-
-        if (BUTTON_COPY_GEAR.equals(key))
-        {
-            copyWornGearToConfig();
-            return;
-        }
-
-        if (BUTTON_COPY_INVENTORY.equals(key))
-        {
-            copyInventoryToConfig();
-        }
-    }
-
     private void handlePrepareBank()
     {
         tripText = "Preparing bank setup";
