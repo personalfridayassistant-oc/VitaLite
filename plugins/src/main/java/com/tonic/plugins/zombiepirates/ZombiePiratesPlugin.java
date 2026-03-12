@@ -136,30 +136,25 @@ public class ZombiePiratesPlugin extends VitaPlugin
             state = State.ESCAPE;
         }
 
-        switch (state)
+        if (state == State.PREPARE_BANK)
         {
-            case PREPARE_BANK:
-                handlePrepareBank();
-                break;
-            case RESTOCK_GE:
-                handleRestockGE();
-                break;
-            case TRAVEL:
-                handleTravel();
-                break;
-            case COMBAT:
-                handleCombat();
-                break;
-            case ESCAPE:
-                handleEscape();
-                break;
-            default:
-                break;
-            case PREPARE_BANK -> handlePrepareBank();
-            case RESTOCK_GE -> handleRestockGE();
-            case TRAVEL -> handleTravel();
-            case COMBAT -> handleCombat();
-            case ESCAPE -> handleEscape();
+            handlePrepareBank();
+        }
+        else if (state == State.RESTOCK_GE)
+        {
+            handleRestockGE();
+        }
+        else if (state == State.TRAVEL)
+        {
+            handleTravel();
+        }
+        else if (state == State.COMBAT)
+        {
+            handleCombat();
+        }
+        else if (state == State.ESCAPE)
+        {
+            handleEscape();
         }
     }
 
