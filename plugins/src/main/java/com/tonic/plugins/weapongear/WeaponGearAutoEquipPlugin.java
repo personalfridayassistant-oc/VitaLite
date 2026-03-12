@@ -9,6 +9,7 @@ import com.tonic.api.widgets.PrayerAPI;
 import com.tonic.data.EquipmentSlot;
 import com.tonic.data.wrappers.ItemEx;
 import com.tonic.util.VitaPlugin;
+import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.plugins.PluginDescriptor;
@@ -20,7 +21,6 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
-import java.util.stream.Collectors;
 
 @PluginDescriptor(
         name = "# Weapon Gear Auto-Equip",
@@ -31,6 +31,9 @@ public class WeaponGearAutoEquipPlugin extends VitaPlugin
 {
     @Inject
     private WeaponGearAutoEquipConfig config;
+
+    @Inject
+    private Client client;
 
     private int lastWeaponId = -1;
     private int lastProcessedWeaponId = -1;
@@ -207,7 +210,7 @@ public class WeaponGearAutoEquipPlugin extends VitaPlugin
         return Arrays.stream(csv.split(","))
                 .map(String::trim)
                 .filter(s -> !s.isEmpty())
-                .collect(Collectors.toList());
+                .toList();
     }
 
     private static boolean isInteger(String value)
