@@ -1,20 +1,9 @@
 package com.tonic.plugins.combatprayer;
 
 import com.google.inject.Inject;
-import com.tonic.api.widgets.PrayerAPI;
-import com.tonic.data.wrappers.NpcEx;
-import com.tonic.services.GameManager;
 import net.runelite.api.Client;
-import net.runelite.api.NPC;
-import net.runelite.api.NPCComposition;
-import net.runelite.api.Skill;
-import net.runelite.api.gameval.InterfaceID;
-import net.runelite.api.gameval.VarbitID;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GameTick;
-import net.runelite.api.events.PlayerDespawned;
-import net.runelite.api.events.PlayerSpawned;
-import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
@@ -26,7 +15,6 @@ import org.slf4j.LoggerFactory;
 
 import java.awt.*;
 import java.awt.image.BufferedImage;
-import java.util.*;
 
 /**
  * Combat Prayer Plugin
@@ -52,7 +40,7 @@ public class CombatPrayerPlugin extends Plugin
         }
         catch (Exception e)
         {
-            // Use default icon if loading fails
+            logger.warn("Failed to load combat prayer icon, using default icon", e);
         }
         pluginIcon = icon;
     }
@@ -60,8 +48,6 @@ public class CombatPrayerPlugin extends Plugin
     @Inject
     private Client client;
 
-    @Inject
-    private ConfigManager configManager;
 
     @Inject
     private ClientToolbar clientToolbar;
@@ -72,7 +58,7 @@ public class CombatPrayerPlugin extends Plugin
     @Override
     protected void startUp() throws Exception
     {
-        prayerManager = new PrayerManager(client, configManager);
+        prayerManager = new PrayerManager(client);
         
         navigationButton = NavigationButton.builder()
                 .panel(prayerManager.getPanel())
