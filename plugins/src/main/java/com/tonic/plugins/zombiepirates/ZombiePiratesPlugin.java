@@ -137,11 +137,31 @@ public class ZombiePiratesPlugin extends VitaPlugin
 
         switch (state)
         {
+<<<<<<< codex/create-automated-zombie-pirates-plugin-15ehrd
+            case PREPARE_BANK:
+                handlePrepareBank();
+                break;
+            case RESTOCK_GE:
+                handleRestockGE();
+                break;
+            case TRAVEL:
+                handleTravel();
+                break;
+            case COMBAT:
+                handleCombat();
+                break;
+            case ESCAPE:
+                handleEscape();
+                break;
+            default:
+                break;
+=======
             case PREPARE_BANK -> handlePrepareBank();
             case RESTOCK_GE -> handleRestockGE();
             case TRAVEL -> handleTravel();
             case COMBAT -> handleCombat();
             case ESCAPE -> handleEscape();
+>>>>>>> main
         }
     }
 
