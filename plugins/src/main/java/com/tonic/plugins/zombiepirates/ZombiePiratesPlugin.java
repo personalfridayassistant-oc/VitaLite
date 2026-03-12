@@ -29,8 +29,6 @@ import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.events.NpcDespawned;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
-import net.runelite.client.config.ConfigButtonClicked;
-import net.runelite.client.events.ConfigButtonClicked;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.overlay.OverlayManager;
@@ -173,20 +171,37 @@ public class ZombiePiratesPlugin extends VitaPlugin
     }
 
     @Subscribe
-    private void onConfigButtonClicked(ConfigButtonClicked event)
+    private void onConfigButtonClicked(Object event)
     {
-        if (!CONFIG_GROUP.equals(event.getGroup()))
+        if (event == null || !"ConfigButtonClicked".equals(event.getClass().getSimpleName()))
         {
             return;
         }
 
-        if (BUTTON_COPY_GEAR.equals(event.getKey()))
+        String group;
+        String key;
+        try
+        {
+            group = (String) event.getClass().getMethod("getGroup").invoke(event);
+            key = (String) event.getClass().getMethod("getKey").invoke(event);
+        }
+        catch (Exception ignored)
+        {
+            return;
+        }
+
+        if (!CONFIG_GROUP.equals(group))
+        {
+            return;
+        }
+
+        if (BUTTON_COPY_GEAR.equals(key))
         {
             copyWornGearToConfig();
             return;
         }
 
-        if (BUTTON_COPY_INVENTORY.equals(event.getKey()))
+        if (BUTTON_COPY_INVENTORY.equals(key))
         {
             copyInventoryToConfig();
         }
