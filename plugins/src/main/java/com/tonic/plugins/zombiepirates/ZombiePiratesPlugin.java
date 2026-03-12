@@ -29,6 +29,7 @@ import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.events.NpcDespawned;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
+import net.runelite.client.config.ConfigButtonClicked;
 import net.runelite.client.events.ConfigButtonClicked;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.plugins.PluginDescriptor;
@@ -137,7 +138,6 @@ public class ZombiePiratesPlugin extends VitaPlugin
 
         switch (state)
         {
-<<<<<<< codex/create-automated-zombie-pirates-plugin-15ehrd
             case PREPARE_BANK:
                 handlePrepareBank();
                 break;
@@ -155,13 +155,11 @@ public class ZombiePiratesPlugin extends VitaPlugin
                 break;
             default:
                 break;
-=======
             case PREPARE_BANK -> handlePrepareBank();
             case RESTOCK_GE -> handleRestockGE();
             case TRAVEL -> handleTravel();
             case COMBAT -> handleCombat();
             case ESCAPE -> handleEscape();
->>>>>>> main
         }
     }
 
