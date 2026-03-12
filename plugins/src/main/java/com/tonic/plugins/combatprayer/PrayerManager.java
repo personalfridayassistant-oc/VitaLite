@@ -1,17 +1,15 @@
 package com.tonic.plugins.combatprayer;
 
-import com.tonic.Static;
 import com.tonic.api.widgets.PrayerAPI;
 import com.tonic.data.wrappers.NpcEx;
-import com.tonic.services.GameManager;
+import net.runelite.api.Actor;
 import net.runelite.api.Client;
 import net.runelite.api.NPC;
 import net.runelite.api.NPCComposition;
-import net.runelite.api.Skill;
-import net.runelite.api.gameval.VarbitID;
 import net.runelite.api.events.ChatMessage;
-import net.runelite.client.config.ConfigManager;
-import java.util.*;
+
+import java.util.HashMap;
+import java.util.Map;
 
 /**
  * Manages combat prayers based on OSRS mechanics and NPC attack styles.
@@ -19,30 +17,19 @@ import java.util.*;
  */
 public class PrayerManager
 {
-    // prayer tick rates
-    private static final int TICKS_TO_SWITCH_PRAYER = 1;
-    
-    // prayer drain rates (points per tick)
-    private static final double PROTECT_FROM_MAGIC_DRAIN = 20.0;
-    private static final double PROTECT_FROM_MISSILES_DRAIN = 20.0;
-    private static final double PROTECT_FROM_MELEE_DRAIN = 20.0;
-    
     private final Client client;
-    private final ConfigManager configManager;
-    private PrayerPanel panel;
-    private PrayerAPI activeProtectionPrayer = null;
-    private NpcEx currentTarget = null;
-    private int lastAttackTick = 0;
-    private int lastDamageTick = 0;
+    private final PrayerPanel panel;
+    private PrayerAPI activeProtectionPrayer;
+    private NpcEx currentTarget;
+    private int lastAttackTick;
+    private int lastDamageTick;
     private final Map<String, String> npcPrayerReqs = new HashMap<>();
 
-    public PrayerManager(Client client, ConfigManager configManager)
+    public PrayerManager(Client client)
     {
         this.client = client;
-        this.configManager = configManager;
         this.panel = new PrayerPanel(this);
-        
-        // Initialize NPC prayer requirements for common bosses
+
         initializeNpcPrayerRequirements();
     }
 
@@ -53,8 +40,6 @@ public class PrayerManager
 
     private void initializeNpcPrayerRequirements()
     {
-        // Common NPC prayer requirements based on OSRS mechanics
-        // Format: NPC name -> required prayer
         npcPrayerReqs.put("General Graardor", "PIETY");
         npcPrayerReqs.put("K'ril Tsutsaroth", "PIETY");
         npcPrayerReqs.put("Zamorakian Champion", "PIETY");
@@ -102,32 +87,25 @@ public class PrayerManager
 
     public void shutdown()
     {
-        // Disable all prayers on shutdown
         PrayerAPI.disableAll();
     }
 
     public void update()
     {
-        // Check if player is in combat
         if (!isInCombat())
         {
             handleIdleState();
+            panel.update();
             return;
         }
 
-        // Get current target
-        currentTarget = getCurrentTarget();
-        
-        // Manage overhead prayers (protection, smite, etc.)
+        currentTarget = findCurrentTarget();
         manageOverheadPrayers();
-        
-        // Update panel
         panel.update();
     }
 
-    private boolean isInCombat()
+    public boolean isInCombat()
     {
-        // Check if player has been attacked or has attacked recently (within last 10 ticks)
         int tickCount = client.getTickCount();
         return tickCount - lastAttackTick <= 10 || tickCount - lastDamageTick <= 10;
     }
@@ -135,54 +113,64 @@ public class PrayerManager
     public void onChatMessage(ChatMessage event)
     {
         String message = event.getMessage();
-        
-        // Track when player attacks
-        if (message.contains("Hitmark") || message.contains("hits") || 
-            message.contains("grazes") || message.contains("blocks") || 
-            message.contains("misses") || message.contains("damage"))
+
+        if (message.contains("Hitmark") || message.contains("hits")
+                || message.contains("grazes") || message.contains("blocks")
+                || message.contains("misses") || message.contains("damage"))
         {
             lastAttackTick = client.getTickCount();
         }
-        
-        // Track when you take damage
-        if (message.contains("You take") || message.contains("take damage") || 
-            message.contains("Your") || message.contains("is hitting"))
+
+        if (message.contains("You take") || message.contains("take damage")
+                || message.contains("Your") || message.contains("is hitting"))
         {
             lastDamageTick = client.getTickCount();
         }
     }
 
+    private NpcEx findCurrentTarget()
+    {
+        if (client.getLocalPlayer() == null)
+        {
+            return null;
+        }
+
+        Actor interacting = client.getLocalPlayer().getInteracting();
+        if (interacting instanceof NPC)
+        {
+            return new NpcEx((NPC) interacting);
+        }
+
+        return null;
+    }
+
     private void handleIdleState()
     {
         currentTarget = null;
-        
-        // Keep overhead prayers active if they were already active
+
         PrayerAPI overhead = PrayerAPI.getActiveOverhead();
         if (overhead != null && isOverheadPrayerStayingActive(overhead))
         {
             activeProtectionPrayer = overhead;
+            return;
         }
-        else
-        {
-            // Disable all prayers when idle
-            PrayerAPI.disableAll();
-            activeProtectionPrayer = null;
-        }
+
+        PrayerAPI.disableAll();
+        activeProtectionPrayer = null;
     }
 
     private void manageOverheadPrayers()
     {
         PrayerAPI activeOverhead = PrayerAPI.getActiveOverhead();
-        
+
         if (currentTarget != null)
         {
-            // Determine what type of attacks the NPC uses
-            String npcName = currentTarget.getComposition().getName();
-            String requiredPrayerName = npcPrayerReqs.get(npcName);
-            
+            NPCComposition composition = currentTarget.getComposition();
+            String npcName = composition != null ? composition.getName() : null;
+            String requiredPrayerName = npcName != null ? npcPrayerReqs.get(npcName) : null;
+
             if (requiredPrayerName != null)
             {
-                // Boss specifically requires a prayer
                 try
                 {
                     PrayerAPI targetPrayer = PrayerAPI.valueOf(requiredPrayerName);
@@ -193,13 +181,12 @@ public class PrayerManager
                     activeProtectionPrayer = targetPrayer;
                     return;
                 }
-                catch (Exception e)
+                catch (IllegalArgumentException ignored)
                 {
-                    // Fallback to damage type detection
+                    // fall back to damage type detection
                 }
             }
-            
-            // Auto-select overhead prayer based on detected attack style
+
             PrayerAPI overhead = detectDamageType();
             if (overhead != null && overhead.hasLevelFor())
             {
@@ -211,14 +198,14 @@ public class PrayerManager
             }
             else if (overhead == null && activeOverhead != null)
             {
-                // No overhead prayer needed, but one is active
                 activeOverhead.turnOff();
                 activeProtectionPrayer = null;
             }
+            return;
         }
-        else if (activeOverhead != null && !isOverheadPrayerStayingActive(activeOverhead))
+
+        if (activeOverhead != null && !isOverheadPrayerStayingActive(activeOverhead))
         {
-            // Disable overhead prayer if we're not in combat
             activeOverhead.turnOff();
             activeProtectionPrayer = null;
         }
@@ -230,17 +217,19 @@ public class PrayerManager
         {
             return null;
         }
-        
+
         NPCComposition composition = currentTarget.getComposition();
         if (composition == null)
         {
             return null;
         }
-        
-        // Check NPC's attack styles from composition
+
         String[] actions = composition.getActions();
-        
-        // Check for "Magic" in actions - indicates magic attacks
+        if (actions == null)
+        {
+            return PrayerAPI.PROTECT_FROM_MELEE;
+        }
+
         for (String action : actions)
         {
             if (action != null && action.equalsIgnoreCase("Magic"))
@@ -248,18 +237,15 @@ public class PrayerManager
                 return PrayerAPI.PROTECT_FROM_MAGIC;
             }
         }
-        
-        // Check for "Range" or "Ranged" in actions - indicates ranged attacks
+
         for (String action : actions)
         {
-            if (action != null && (action.equalsIgnoreCase("Range") || 
-                                  action.equalsIgnoreCase("Ranged")))
+            if (action != null && (action.equalsIgnoreCase("Range") || action.equalsIgnoreCase("Ranged")))
             {
                 return PrayerAPI.PROTECT_FROM_MISSILES;
             }
         }
-        
-        // Default to melee protection
+
         return PrayerAPI.PROTECT_FROM_MELEE;
     }
 
@@ -269,25 +255,24 @@ public class PrayerManager
         {
             return;
         }
-        
+
         PrayerAPI activeOverhead = PrayerAPI.getActiveOverhead();
         if (activeOverhead != null && activeOverhead != prayer)
         {
             activeOverhead.turnOff();
         }
-        
+
         prayer.turnOn();
         activeProtectionPrayer = prayer;
     }
 
     private boolean isOverheadPrayerStayingActive(PrayerAPI prayer)
     {
-        // Certain overhead prayers should stay active when in combat
         if (prayer == null)
         {
             return false;
         }
-        
+
         switch (prayer)
         {
             case PROTECT_FROM_MAGIC:
@@ -302,32 +287,29 @@ public class PrayerManager
         }
     }
 
-    // Getters for the panel
     public boolean isUsingRanged()
     {
         PrayerAPI active = PrayerAPI.getActiveOverhead();
         return active == PrayerAPI.PROTECT_FROM_MISSILES;
     }
-    
+
     public boolean isUsingMagic()
     {
         PrayerAPI active = PrayerAPI.getActiveOverhead();
         return active == PrayerAPI.PROTECT_FROM_MAGIC;
     }
-    
+
     public boolean isUsingMelee()
     {
         PrayerAPI active = PrayerAPI.getActiveOverhead();
-        return active != null && 
-               active != PrayerAPI.PROTECT_FROM_MAGIC && 
-               active != PrayerAPI.PROTECT_FROM_MISSILES;
+        return active == PrayerAPI.PROTECT_FROM_MELEE;
     }
-    
-    public com.tonic.data.wrappers.NpcEx getCurrentTarget()
+
+    public NpcEx getCurrentTarget()
     {
         return currentTarget;
     }
-    
+
     public PrayerAPI getActivePrayer()
     {
         return activeProtectionPrayer;
