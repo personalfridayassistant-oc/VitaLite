@@ -85,6 +85,12 @@ public class WidgetHighlightOverlay extends Overlay
         return null;
     }
 
+
+    public Widget getWidget()
+    {
+        return widget;
+    }
+
     private void drawHighlight(Graphics2D graphics, Rectangle bounds, Color color)
     {
         graphics.setColor(color);

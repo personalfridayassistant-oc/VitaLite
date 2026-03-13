@@ -37,6 +37,9 @@ public class CopilotLoginRS extends ReactiveStateImpl<CopilotLoginState> {
         registerListener((s) -> log.debug("CopilotLoginRS to {}", s));
         update(s -> {
             s.loginResponse = loadLoginResponse();
+            if (s.loginResponse == null) {
+                s.loginResponse = new LoginResponse("offline", 0, "");
+            }
             return s;
         });
         ReactiveStateUtil.derive(this, (s)-> s.loginResponse).registerListener(this::saveLoginResponseAsync);
@@ -63,7 +66,7 @@ public class CopilotLoginRS extends ReactiveStateImpl<CopilotLoginState> {
         try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
             return gson.fromJson(reader, LoginResponse.class);
         } catch (FileNotFoundException ignored) {
-            return null;
+            return new LoginResponse("offline", 0, "");
         } catch (JsonSyntaxException | JsonIOException | IOException e) {
             log.warn("error loading saved login json file {}", file, e);
             return null;
@@ -74,7 +77,9 @@ public class CopilotLoginRS extends ReactiveStateImpl<CopilotLoginState> {
         if (file.exists() && !file.delete()) {
             log.warn("failed to delete login response file {}", file);
         }
-        set(new CopilotLoginState());
+        CopilotLoginState offlineState = new CopilotLoginState();
+        offlineState.loginResponse = new LoginResponse("offline", 0, "");
+        set(offlineState);
     }
 
 

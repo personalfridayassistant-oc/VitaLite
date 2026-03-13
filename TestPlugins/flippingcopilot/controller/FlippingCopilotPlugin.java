@@ -116,6 +116,8 @@ public class FlippingCopilotPlugin extends Plugin {
 	private OsrsLoginRS osrsLoginRS;
 	@Inject
 	private FlippingCopilotConfigRS configRS;
+	@Inject
+	private AutomationController automationController;
 
 	// We use our own ThreadPool since the default ScheduledExecutorService only has a single thread and we don't want to block it
 	@Provides
@@ -221,6 +223,7 @@ public class FlippingCopilotPlugin extends Plugin {
 	public void onGameTick(GameTick event) {
 		suggestionController.onGameTick();
 		offerEventHandler.onGameTick();
+		automationController.onGameTick();
 		grandExchangeOpenRS.set(grandExchange.isOpen());
 		osrsLoginRS.set(osrsLoginRS.get().nextState(client));
 	}
