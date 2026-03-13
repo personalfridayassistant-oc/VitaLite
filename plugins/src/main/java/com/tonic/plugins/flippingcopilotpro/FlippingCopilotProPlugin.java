@@ -603,15 +603,8 @@ public class FlippingCopilotProPlugin extends VitaPlugin
             return true;
         }
 
-        try
-        {
-            return !client.getItemComposition(itemId).isMembers();
-        }
-        catch (Exception ignored)
-        {
-            String name = itemName(itemId);
-            return !(name.endsWith("(Members)") || name.contains("Members"));
-        }
+        String name = itemName(itemId);
+        return !(name.endsWith("(Members)") || name.contains("Members"));
     }
 
     private boolean isMembersAccountLoggedIn()
