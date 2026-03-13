@@ -6,6 +6,7 @@ import com.google.gson.JsonParser;
 import com.google.inject.Provides;
 import com.tonic.Logger;
 import com.tonic.api.entities.NpcAPI;
+import com.tonic.api.game.ClientScriptAPI;
 import com.tonic.api.game.WorldsAPI;
 import com.tonic.api.threaded.Delays;
 import com.tonic.api.widgets.GrandExchangeAPI;
@@ -38,6 +39,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ThreadLocalRandom;
 
 @PluginDescriptor(
         name = "# Flipping Copilot Auto",
@@ -121,6 +123,8 @@ public class FlippingCopilotPlugin extends VitaPlugin
     private String statusText = "Idle";
     private Opportunity currentProposed;
     private Opportunity bestSeen;
+    private String slotText = "0/0";
+    private String marketSourceText;
 
     @Provides
     FlippingCopilotConfig provideConfig(ConfigManager configManager)
@@ -134,6 +138,8 @@ public class FlippingCopilotPlugin extends VitaPlugin
         startTime = Instant.now();
         gpMade = 0;
         statusText = "Starting";
+        slotText = "0/0";
+        marketSourceText = config.marketSourceLabel();
         currentProposed = null;
         bestSeen = null;
         overlayManager.add(overlay);
@@ -157,6 +163,10 @@ public class FlippingCopilotPlugin extends VitaPlugin
 
         Set<Integer> candidates = parseCandidateIds(config.candidateItemIds());
         updatePnlTracking(candidates);
+        updateSlotText();
+
+        // Clear stuck numeric prompts before any GE action pass.
+        ClientScriptAPI.closeNumericInputDialogue();
 
         if (!GrandExchangeAPI.isOpen())
         {
@@ -164,6 +174,7 @@ public class FlippingCopilotPlugin extends VitaPlugin
             if (config.autoOpenGe())
             {
                 openGrandExchange();
+                humanPause();
             }
             Delays.tick(Math.max(1, config.loopDelayTicks()));
             return;
@@ -172,7 +183,7 @@ public class FlippingCopilotPlugin extends VitaPlugin
         if (GrandExchangeAPI.canCollect())
         {
             GrandExchangeAPI.collectAll();
-            Delays.tick(1);
+            humanPause();
         }
 
         pruneAndCancelStaleOffers();
@@ -209,33 +220,152 @@ public class FlippingCopilotPlugin extends VitaPlugin
             bestSeen = currentProposed;
         }
 
-        if (GrandExchangeAPI.freeSlot() == -1)
+        int actions = executeWithAllAvailableSlots(opportunities);
+        if (actions == 0)
         {
-            statusText = "Waiting for free GE slot";
-            Delays.tick(Math.max(1, config.loopDelayTicks()));
-            return;
+            statusText = "No actionable trade";
         }
 
-        int take = Math.min(Math.max(1, config.targetItemsPerCycle()), opportunities.size());
-        for (int i = 0; i < take; i++)
+        ClientScriptAPI.closeNumericInputDialogue();
+        Delays.tick(Math.max(1, config.loopDelayTicks()));
+    }
+
+    private int executeWithAllAvailableSlots(List<Opportunity> opportunities)
+    {
+        int freeSlots = getFreeEligibleSlots();
+        if (freeSlots <= 0)
         {
-            Opportunity opportunity = opportunities.get(i);
+            statusText = "No free eligible GE slots";
+            return 0;
+        }
+
+        int actions = 0;
+
+        // 1) Prioritize sells first.
+        for (Opportunity opportunity : opportunities)
+        {
+            if (freeSlots <= 0)
+            {
+                break;
+            }
             if (hasActiveOffer(opportunity.itemId))
             {
                 continue;
             }
 
-            if (submitOpportunity(opportunity))
+            int inventoryAmount = inventoryAmount(opportunity.itemId);
+            if (inventoryAmount <= 0)
             {
+                continue;
+            }
+
+            if (submitSell(opportunity, inventoryAmount))
+            {
+                actions++;
+                freeSlots--;
                 activeOfferSince.put(opportunity.itemId, Instant.now());
-                statusText = "Submitted " + itemName(opportunity.itemId);
-                Delays.tick(Math.max(1, config.loopDelayTicks()));
-                return;
+                statusText = "Selling " + itemName(opportunity.itemId);
+                humanPause();
             }
         }
 
-        statusText = "No actionable trade";
-        Delays.tick(Math.max(1, config.loopDelayTicks()));
+        if (freeSlots <= 0)
+        {
+            return actions;
+        }
+
+        // 2) Then buy, diversified budget across remaining slots and top opportunities.
+        int availableCoins = inventoryAmount(ItemID.COINS);
+        if (availableCoins <= 0)
+        {
+            return actions;
+        }
+
+        List<Opportunity> buyCandidates = new ArrayList<>();
+        for (Opportunity opportunity : opportunities)
+        {
+            if (hasActiveOffer(opportunity.itemId))
+            {
+                continue;
+            }
+            int inventoryAmount = inventoryAmount(opportunity.itemId);
+            if (inventoryAmount < opportunity.targetQuantity)
+            {
+                buyCandidates.add(opportunity);
+            }
+            if (buyCandidates.size() >= Math.max(1, config.targetItemsPerCycle()))
+            {
+                break;
+            }
+        }
+
+        int buyTargets = Math.min(freeSlots, buyCandidates.size());
+        if (buyTargets <= 0)
+        {
+            return actions;
+        }
+
+        int coinsRemaining = availableCoins;
+        for (int i = 0; i < buyTargets && freeSlots > 0; i++)
+        {
+            Opportunity opportunity = buyCandidates.get(i);
+            int inventoryAmount = inventoryAmount(opportunity.itemId);
+            int needed = Math.max(0, opportunity.targetQuantity - inventoryAmount);
+            if (needed <= 0)
+            {
+                continue;
+            }
+
+            int slotsLeftForBuys = Math.max(1, buyTargets - i);
+            int diversifiedBudget = Math.min(Math.max(1, coinsRemaining / slotsLeftForBuys), Math.max(1, config.maxGpPerTrade()));
+            int affordableQuantity = Math.min(needed, diversifiedBudget / Math.max(1, opportunity.buyPrice));
+            if (affordableQuantity <= 0)
+            {
+                continue;
+            }
+
+            if (submitBuy(opportunity, affordableQuantity))
+            {
+                actions++;
+                freeSlots--;
+                activeOfferSince.put(opportunity.itemId, Instant.now());
+                coinsRemaining -= (affordableQuantity * opportunity.buyPrice);
+                statusText = "Buying " + itemName(opportunity.itemId);
+                humanPause();
+            }
+        }
+
+        return actions;
+    }
+
+    private boolean submitBuy(Opportunity opportunity, int quantity)
+    {
+        Position position = positions.computeIfAbsent(opportunity.itemId, k -> new Position());
+        position.lastBuyPrice = opportunity.buyPrice;
+        ClientScriptAPI.closeNumericInputDialogue();
+        boolean ok = GrandExchangeAPI.startBuyOffer(opportunity.itemId, quantity, opportunity.buyPrice) != null;
+        ClientScriptAPI.closeNumericInputDialogue();
+        return ok;
+    }
+
+    private boolean submitSell(Opportunity opportunity, int inventoryAmount)
+    {
+        holdingsSince.putIfAbsent(opportunity.itemId, Instant.now());
+        boolean timedOut = Duration.between(holdingsSince.get(opportunity.itemId), Instant.now()).getSeconds() >= Math.max(30, config.sellTimeoutSeconds());
+        int sellPrice = timedOut ? opportunity.panicSellPrice : opportunity.normalSellPrice;
+        int quantityToSell = Math.min(inventoryAmount, opportunity.targetQuantity);
+        if (quantityToSell <= 0)
+        {
+            return false;
+        }
+
+        Position position = positions.computeIfAbsent(opportunity.itemId, k -> new Position());
+        position.lastSellPrice = sellPrice;
+
+        ClientScriptAPI.closeNumericInputDialogue();
+        boolean ok = GrandExchangeAPI.startSellOffer(opportunity.itemId, quantityToSell, sellPrice) != null;
+        ClientScriptAPI.closeNumericInputDialogue();
+        return ok;
     }
 
     private void openGrandExchange()
@@ -270,6 +400,8 @@ public class FlippingCopilotPlugin extends VitaPlugin
             if (start != null && Duration.between(start, now).getSeconds() >= timeoutSeconds)
             {
                 GrandExchangeAPI.abortOffer(offer.getItemId());
+                ClientScriptAPI.closeNumericInputDialogue();
+                humanPause();
                 activeOfferSince.put(offer.getItemId(), now);
             }
         }
@@ -316,6 +448,7 @@ public class FlippingCopilotPlugin extends VitaPlugin
     private Map<Integer, MarketSnapshot> fetchSnapshots(Set<Integer> itemIds)
     {
         Map<Integer, MarketSnapshot> snapshots = new HashMap<>();
+        marketSourceText = config.marketSourceLabel();
         try
         {
             JsonObject latestRoot = readJson(WIKI_LATEST).getAsJsonObject();
@@ -392,7 +525,6 @@ public class FlippingCopilotPlugin extends VitaPlugin
             int normalSellPrice = Math.max(buyPrice + 1, applyPercent(snap.high, -Math.abs(config.sellPriceUndercutPercent()), false));
             int panicSellPrice = Math.max(1, applyPercent(snap.low, -Math.abs(config.panicSellDiscountPercent()), false));
             int targetQuantity = Math.max(1, Math.min(volume / 2, maxGpPerTrade / Math.max(1, buyPrice)));
-
             if (targetQuantity <= 0)
             {
                 continue;
@@ -401,48 +533,10 @@ public class FlippingCopilotPlugin extends VitaPlugin
             long agePenalty = Math.max(0, (System.currentTimeMillis() / 1000L) - Math.min(snap.highTime, snap.lowTime));
             double freshness = 1.0 / Math.max(1.0, agePenalty / 300.0);
             double score = (normalSellPrice - buyPrice) * Math.log10(Math.max(10, volume)) * freshness;
-
             opportunities.add(new Opportunity(itemId, targetQuantity, buyPrice, normalSellPrice, panicSellPrice, roi, score));
         }
 
         return opportunities;
-    }
-
-    private boolean submitOpportunity(Opportunity opportunity)
-    {
-        int inventoryAmount = inventoryAmount(opportunity.itemId);
-
-        if (inventoryAmount < opportunity.targetQuantity)
-        {
-            int remaining = opportunity.targetQuantity - inventoryAmount;
-            int availableCoins = inventoryAmount(ItemID.COINS);
-            int affordableQuantity = Math.min(remaining, availableCoins / Math.max(1, opportunity.buyPrice));
-            if (affordableQuantity <= 0)
-            {
-                statusText = "Insufficient coins for " + itemName(opportunity.itemId);
-                return false;
-            }
-
-            Position position = positions.computeIfAbsent(opportunity.itemId, k -> new Position());
-            position.lastBuyPrice = opportunity.buyPrice;
-
-            return GrandExchangeAPI.startBuyOffer(opportunity.itemId, affordableQuantity, opportunity.buyPrice) != null;
-        }
-
-        holdingsSince.putIfAbsent(opportunity.itemId, Instant.now());
-        boolean timedOut = Duration.between(holdingsSince.get(opportunity.itemId), Instant.now()).getSeconds() >= Math.max(30, config.sellTimeoutSeconds());
-        int sellPrice = timedOut ? opportunity.panicSellPrice : opportunity.normalSellPrice;
-
-        int quantityToSell = Math.min(inventoryAmount, opportunity.targetQuantity);
-        if (quantityToSell <= 0)
-        {
-            return false;
-        }
-
-        Position position = positions.computeIfAbsent(opportunity.itemId, k -> new Position());
-        position.lastSellPrice = sellPrice;
-
-        return GrandExchangeAPI.startSellOffer(opportunity.itemId, quantityToSell, sellPrice) != null;
     }
 
     private boolean isMembersOnlyItemOnFreeWorld(int itemId)
@@ -454,6 +548,47 @@ public class FlippingCopilotPlugin extends VitaPlugin
 
         String name = itemName(itemId);
         return name.endsWith("(Members)") || name.contains("Members");
+    }
+
+    private int getEligibleSlotsLimit()
+    {
+        return WorldsAPI.inMembersWorld() ? 6 : 3;
+    }
+
+    private int getFreeEligibleSlots()
+    {
+        int limit = getEligibleSlotsLimit();
+        GrandExchangeOffer[] offers = client.getGrandExchangeOffers();
+        if (offers == null)
+        {
+            return 0;
+        }
+
+        int free = 0;
+        for (int i = 0; i < Math.min(limit, offers.length); i++)
+        {
+            GrandExchangeOffer offer = offers[i];
+            if (offer == null || offer.getState() == GrandExchangeOfferState.EMPTY)
+            {
+                free++;
+            }
+        }
+        return free;
+    }
+
+    private void updateSlotText()
+    {
+        int limit = getEligibleSlotsLimit();
+        int free = getFreeEligibleSlots();
+        int used = Math.max(0, limit - free);
+        slotText = used + "/" + limit;
+    }
+
+    private void humanPause()
+    {
+        int min = Math.max(20, config.humanDelayMinMs());
+        int max = Math.max(min, config.humanDelayMaxMs());
+        Delays.wait(ThreadLocalRandom.current().nextInt(min, max + 1));
     }
 
     private void updatePnlTracking(Set<Integer> candidates)
@@ -481,7 +616,6 @@ public class FlippingCopilotPlugin extends VitaPlugin
 
                 p.quantity = Math.max(0, p.quantity - sold);
                 p.totalCost = Math.max(0L, p.totalCost - (long) sold * avgCost);
-
                 if (p.quantity == 0)
                 {
                     holdingsSince.remove(itemId);
@@ -561,10 +695,7 @@ public class FlippingCopilotPlugin extends VitaPlugin
         }
     }
 
-    public long getGpMade()
-    {
-        return gpMade;
-    }
+    public long getGpMade() { return gpMade; }
 
     public String getRuntimeText()
     {
@@ -574,10 +705,7 @@ public class FlippingCopilotPlugin extends VitaPlugin
         }
 
         Duration d = Duration.between(startTime, Instant.now());
-        long h = d.toHours();
-        long m = d.toMinutesPart();
-        long s = d.toSecondsPart();
-        return String.format("%02d:%02d:%02d", h, m, s);
+        return String.format("%02d:%02d:%02d", d.toHours(), d.toMinutesPart(), d.toSecondsPart());
     }
 
     public String getProposedItemText()
@@ -586,7 +714,6 @@ public class FlippingCopilotPlugin extends VitaPlugin
         {
             return "None";
         }
-
         return itemName(currentProposed.itemId) + " (" + String.format("%.2f%%", currentProposed.roi * 100.0) + ")";
     }
 
@@ -596,12 +723,10 @@ public class FlippingCopilotPlugin extends VitaPlugin
         {
             return "None";
         }
-
         return itemName(bestSeen.itemId) + " (" + String.format("%.2f%%", bestSeen.roi * 100.0) + ")";
     }
 
-    public String getStatusText()
-    {
-        return statusText;
-    }
+    public String getStatusText() { return statusText; }
+    public String getSlotText() { return slotText; }
+    public String getMarketSourceText() { return marketSourceText == null ? "prices.runescape.wiki/osrs" : marketSourceText; }
 }
