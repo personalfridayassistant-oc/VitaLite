@@ -592,6 +592,11 @@ public class MarketMentorPlugin extends VitaPlugin
         lastCollectAt = Instant.now();
     }
 
+    private void collectFast()
+    {
+        collectImmediate();
+    }
+
     private void clearNumericDialogueFailsafe()
     {
         for (int i = 0; i < 3; i++)
