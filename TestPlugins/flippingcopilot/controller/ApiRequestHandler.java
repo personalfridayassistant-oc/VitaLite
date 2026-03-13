@@ -488,18 +488,37 @@ public class ApiRequestHandler {
     }
 
     private String extractErrorMessage(Response response) {
-        if (response.body() != null) {
-            try {
-                String bodyStr = response.body().string();
-                JsonObject errorJson = gson.fromJson(bodyStr, JsonObject.class);
-                if (errorJson.has("message")) {
+        if (response.body() == null) {
+            return UNKNOWN_ERROR;
+        }
+        try {
+            String bodyStr = response.body().string();
+            if (bodyStr == null || bodyStr.isBlank()) {
+                return UNKNOWN_ERROR;
+            }
+            JsonElement parsed = JsonParser.parseString(bodyStr);
+            if (parsed.isJsonObject()) {
+                JsonObject errorJson = parsed.getAsJsonObject();
+                if (errorJson.has("message") && !errorJson.get("message").isJsonNull()) {
                     return errorJson.get("message").getAsString();
                 }
-            } catch (Exception e) {
-                log.warn("failed reading/parsing error message from http {} response body", response.code(), e);
+                if (errorJson.has("error") && !errorJson.get("error").isJsonNull()) {
+                    return errorJson.get("error").getAsString();
+                }
+                return bodyStr;
             }
+            if (parsed.isJsonPrimitive()) {
+                return parsed.getAsString();
+            }
+            return bodyStr;
+        } catch (Exception e) {
+            log.warn("failed reading/parsing error message from http {} response body", response.code(), e);
+            return UNKNOWN_ERROR;
         }
-        return UNKNOWN_ERROR;
+    }
+
+    private boolean isOfflineToken(String jwtToken) {
+        return jwtToken == null || jwtToken.isBlank() || "offline".equals(jwtToken);
     }
 
 
@@ -751,6 +770,10 @@ public class ApiRequestHandler {
 
     public void asyncLoadAccounts(Consumer<Map<String, Integer>> onSuccess, Consumer<String> onFailure) {
         String jwtToken = copilotLoginRS.get().getJwtToken();
+        if (isOfflineToken(jwtToken)) {
+            onSuccess.accept(new HashMap<>());
+            return;
+        }
         Request request = new Request.Builder()
                 .url(serverUrl + "/profit-tracking/rs-account-names")
                 .addHeader("Authorization", "Bearer " + jwtToken)
@@ -770,6 +793,11 @@ public class ApiRequestHandler {
                     if (!response.isSuccessful()) {
                         if(response.code() == UNAUTHORIZED_CODE && Objects.equals(jwtToken, copilotLoginRS.get().getJwtToken())) {
                             copilotLoginRS.clear();
+                        }
+                        if (response.code() == 403) {
+                            log.info("load user display names forbidden with current token, continuing in offline mode");
+                            onSuccess.accept(new HashMap<>());
+                            return;
                         }
                         String errorMessage = extractErrorMessage(response);
                         log.error("load user display names failed with http status code {}, error message {}", response.code(), errorMessage);

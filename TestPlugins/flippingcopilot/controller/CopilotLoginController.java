@@ -71,14 +71,16 @@ public class CopilotLoginController {
 
     private void loadCopilotAccounts(int previousFailures) {
         int userId = copilotLoginRS.get().getUserId();
-        if(userId == -1) {
+        if(userId <= 0) {
             return;
         }
         long s = System.nanoTime();
         Consumer<Map<String, Integer>> onSuccess = (displayNameToAccountId) -> {
             displayNameToAccountId.forEach((key, value) -> copilotLoginRS.addAccountIfMissing(value, key, userId));
             log.info("loading {} copilot accounts succeeded - took {}ms", displayNameToAccountId.size(), (System.nanoTime() - s) / 1000_000);
-            syncFlips(copilotLoginRS.get().getUserId(), new HashMap<>(), 0);
+            if (!displayNameToAccountId.isEmpty()) {
+                syncFlips(copilotLoginRS.get().getUserId(), new HashMap<>(), 0);
+            }
         };
         Consumer<String> onFailure = (errorMessage) -> {
             if (copilotLoginRS.get().isLoggedIn()) {
