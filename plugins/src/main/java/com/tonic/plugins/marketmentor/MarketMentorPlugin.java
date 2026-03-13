@@ -40,6 +40,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -176,10 +177,14 @@ public class MarketMentorPlugin extends VitaPlugin
     private final List<PanelOffer> panelOffers = new ArrayList<>();
     private final Map<Integer, Boolean> wikiMembershipMap = new HashMap<>();
     private final Map<Integer, Integer> wikiGeLimitMap = new HashMap<>();
+    private final Map<Integer, String> wikiItemNameMap = new HashMap<>();
+    private final Map<Integer, Instant> buyLimitLockoutUntil = new HashMap<>();
     private final Map<Integer, Integer> pendingBuyPrice = new HashMap<>();
     private final Map<Integer, Integer> pendingSellPrice = new HashMap<>();
 
     private Instant lastMappingRefresh = Instant.EPOCH;
+    private Instant lastCollectAt = Instant.EPOCH;
+    private Instant lastWebhookAt = Instant.EPOCH;
     private Instant startTime;
     private long gpMade;
     private long itemsFlipped;
@@ -190,6 +195,8 @@ public class MarketMentorPlugin extends VitaPlugin
     private Opportunity currentSuggestion;
     private Opportunity bestSuggestion;
     private int lastAnnouncedSuggestionId = -1;
+    private final Map<Integer, Double> itemPriorityMemory = new HashMap<>();
+    private final Set<Integer> blacklistIds = new HashSet<>();
 
     @Provides
     MarketMentorConfig provideConfig(ConfigManager configManager)
@@ -238,6 +245,9 @@ public class MarketMentorPlugin extends VitaPlugin
         }
 
         refreshMappingIfStale();
+        blacklistIds.clear();
+        blacklistIds.addAll(parseBlacklist(config.blacklistItemIds()));
+        buyLimitLockoutUntil.entrySet().removeIf(e -> Instant.now().isAfter(e.getValue()));
         updatePnlTracking();
         updateSlotText();
         coinsText = String.format("%,d", inventoryAmount(ItemID.COINS));
@@ -260,6 +270,11 @@ public class MarketMentorPlugin extends VitaPlugin
         pruneAndCancelStaleOffers();
 
         List<MarketSnapshot> snapshots = fetchSnapshots();
+        Map<Integer, MarketSnapshot> snapshotById = new HashMap<>();
+        for (MarketSnapshot snapshot : snapshots)
+        {
+            snapshotById.put(snapshot.itemId, snapshot);
+        }
         List<Opportunity> opportunities = buildOpportunities(snapshots, false);
         if (opportunities.isEmpty())
         {
@@ -305,8 +320,8 @@ public class MarketMentorPlugin extends VitaPlugin
         }
 
         trackTopItems(opportunities);
-        int actions = forceExitBadDeals(opportunityById);
-        actions += executeTrades(opportunities);
+        int actions = forceExitBadDeals(opportunityById, snapshotById);
+        actions += executeTrades(opportunities, snapshotById);
         if (actions == 0)
         {
             statusText = "No actionable trade";
@@ -323,12 +338,13 @@ public class MarketMentorPlugin extends VitaPlugin
             }
         }
 
+        maybeSendDiscordSummary();
         refreshPanel();
         clearNumericDialogueFailsafe();
         Delays.tick(Math.max(1, config.loopDelayTicks()));
     }
 
-    private int executeTrades(List<Opportunity> opportunities)
+    private int executeTrades(List<Opportunity> opportunities, Map<Integer, MarketSnapshot> snapshotById)
     {
         int freeSlots = getFreeEligibleSlots();
         freeSlots = Math.max(0, freeSlots - Math.max(0, config.reservedSlots()));
@@ -386,7 +402,10 @@ public class MarketMentorPlugin extends VitaPlugin
                     continue;
                 }
 
-                Opportunity fallback = new Opportunity(itemId, Math.max(1, pendingBuyPrice.getOrDefault(itemId, 1)), Math.max(1, pendingSellPrice.getOrDefault(itemId, pendingBuyPrice.getOrDefault(itemId, 1))), Math.max(1, pendingBuyPrice.getOrDefault(itemId, 1)), invAmount, 1, Math.max(1, invAmount), 0.0, 0.0);
+                MarketSnapshot snapshot = snapshotById.get(itemId);
+                int buyRef = snapshot != null ? Math.max(1, snapshot.low) : Math.max(1, pendingBuyPrice.getOrDefault(itemId, 1));
+                int sellRef = snapshot != null ? Math.max(1, applyPercent(snapshot.high, -Math.abs(config.sellUndercutPct()), false)) : Math.max(1, pendingSellPrice.getOrDefault(itemId, pendingBuyPrice.getOrDefault(itemId, 1)));
+                Opportunity fallback = new Opportunity(itemId, buyRef, sellRef, Math.max(1, buyRef), invAmount, 1, Math.max(1, invAmount), 0.0, 0.0);
                 if (submitSell(fallback, invAmount))
                 {
                     actions++;
@@ -452,7 +471,7 @@ public class MarketMentorPlugin extends VitaPlugin
         return actions;
     }
 
-    private int forceExitBadDeals(Map<Integer, Opportunity> opportunityById)
+    private int forceExitBadDeals(Map<Integer, Opportunity> opportunityById, Map<Integer, MarketSnapshot> snapshotById)
     {
         int actions = 0;
         for (int itemId : new HashSet<>(trackedItemIds))
@@ -478,6 +497,11 @@ public class MarketMentorPlugin extends VitaPlugin
             }
 
             int sellPrice = o != null ? Math.max(1, o.panicSellPrice) : Math.max(1, avgCost - 1);
+            MarketSnapshot snap = snapshotById.get(itemId);
+            if (snap != null)
+            {
+                sellPrice = Math.max(1, applyPercent(snap.high, -Math.abs(config.sellUndercutPct()), false));
+            }
             Opportunity exit = new Opportunity(itemId, avgCost, sellPrice, sellPrice, invAmount, 1, invAmount, 0, 0);
             if (submitSell(exit, invAmount))
             {
@@ -492,12 +516,46 @@ public class MarketMentorPlugin extends VitaPlugin
 
     private void collectFast()
     {
-        for (int i = 0; i < 4 && GrandExchangeAPI.canCollect(); i++)
+        if (!shouldCollectNow())
         {
-            GrandExchangeAPI.collectAll();
-            clearNumericDialogueFailsafe();
-            Delays.wait(35);
+            return;
         }
+
+        GrandExchangeAPI.collectAll();
+        clearNumericDialogueFailsafe();
+        lastCollectAt = Instant.now();
+    }
+
+    private boolean shouldCollectNow()
+    {
+        if (Duration.between(lastCollectAt, Instant.now()).toMillis() < 650)
+        {
+            return false;
+        }
+
+        if (!GrandExchangeAPI.canCollect())
+        {
+            return false;
+        }
+
+        for (GrandExchangeOffer offer : GrandExchangeAPI.getOffers())
+        {
+            if (offer == null)
+            {
+                continue;
+            }
+
+            GrandExchangeOfferState state = offer.getState();
+            if (state == GrandExchangeOfferState.BOUGHT
+                    || state == GrandExchangeOfferState.SOLD
+                    || state == GrandExchangeOfferState.CANCELLED_BUY
+                    || state == GrandExchangeOfferState.CANCELLED_SELL)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private void clearNumericDialogueFailsafe()
@@ -529,7 +587,7 @@ public class MarketMentorPlugin extends VitaPlugin
 
         for (MarketSnapshot snap : snapshots)
         {
-            if (!isItemBuyableForCurrentAccount(snap.itemId) || snap.low <= 0 || snap.high <= snap.low)
+            if (blacklistIds.contains(snap.itemId) || !isItemBuyableForCurrentAccount(snap.itemId) || snap.low <= 0 || snap.high <= snap.low)
             {
                 continue;
             }
@@ -555,6 +613,12 @@ public class MarketMentorPlugin extends VitaPlugin
             int sellPrice = Math.max(buyPrice + 1, applyPercent(snap.high, -Math.abs(config.sellUndercutPct()), false));
             int panicSell = Math.max(1, applyPercent(snap.low, -Math.abs(config.panicDiscountPct()), false));
 
+            int grossProfit = sellPrice - buyPrice;
+            if (grossProfit < Math.max(0, config.minProfitMarginGp()))
+            {
+                continue;
+            }
+
             double netPerItem = (sellPrice * (1.0 - ESTIMATED_GE_TAX)) - buyPrice;
             double netRoi = netPerItem / Math.max(1.0, buyPrice);
             if (netRoi < minNetRoi)
@@ -565,7 +629,8 @@ public class MarketMentorPlugin extends VitaPlugin
             int volume = snap.minVolume();
             int spread = Math.max(1, snap.high - snap.low);
             int targetQuantity = Math.max(1, Math.min(volume / 2, Math.max(1, config.maxGpPerTrade()) / Math.max(1, buyPrice)));
-            double score = (netPerItem * Math.log10(Math.max(10, volume))) + (spread * 0.01);
+            double memoryBoost = 1.0 + Math.max(-0.5, Math.min(2.5, itemPriorityMemory.getOrDefault(snap.itemId, 0.0)));
+            double score = ((netPerItem * Math.log10(Math.max(10, volume))) + (spread * 0.01)) * memoryBoost;
             opportunities.add(new Opportunity(snap.itemId, buyPrice, sellPrice, panicSell, targetQuantity, spread, volume, netRoi, score));
         }
 
@@ -578,7 +643,7 @@ public class MarketMentorPlugin extends VitaPlugin
         List<Opportunity> opportunities = new ArrayList<>();
         for (MarketSnapshot snap : snapshots)
         {
-            if (!isItemBuyableForCurrentAccount(snap.itemId) || snap.low <= 0 || snap.high <= snap.low)
+            if (blacklistIds.contains(snap.itemId) || !isItemBuyableForCurrentAccount(snap.itemId) || snap.low <= 0 || snap.high <= snap.low)
             {
                 continue;
             }
@@ -587,6 +652,11 @@ public class MarketMentorPlugin extends VitaPlugin
             int spread = Math.max(1, snap.high - snap.low);
             int buyPrice = Math.max(1, snap.low);
             int sellPrice = Math.max(buyPrice + 1, snap.high);
+            int grossProfit = sellPrice - buyPrice;
+            if (grossProfit < Math.max(0, config.minProfitMarginGp()))
+            {
+                continue;
+            }
             int qty = Math.max(1, Math.min(5, Math.max(1, config.maxGpPerTrade()) / buyPrice));
             double netRoi = (((sellPrice * (1.0 - ESTIMATED_GE_TAX)) - buyPrice) / Math.max(1.0, buyPrice));
             double score = spread * Math.log10(Math.max(10, volume));
@@ -691,6 +761,7 @@ public class MarketMentorPlugin extends VitaPlugin
             JsonArray mappingArray = readJson(WIKI_MAPPING).getAsJsonArray();
             wikiMembershipMap.clear();
             wikiGeLimitMap.clear();
+            wikiItemNameMap.clear();
             for (JsonElement element : mappingArray)
             {
                 JsonObject obj = element.getAsJsonObject();
@@ -701,8 +772,13 @@ public class MarketMentorPlugin extends VitaPlugin
                 }
                 boolean members = obj.has("members") && !obj.get("members").isJsonNull() && obj.get("members").getAsBoolean();
                 int geLimit = getInt(obj, "limit", 0);
+                String name = obj.has("name") && !obj.get("name").isJsonNull() ? obj.get("name").getAsString() : null;
                 wikiMembershipMap.put(id, members);
                 wikiGeLimitMap.put(id, geLimit);
+                if (name != null && !name.trim().isEmpty())
+                {
+                    wikiItemNameMap.put(id, name);
+                }
             }
             lastMappingRefresh = Instant.now();
         }
@@ -714,12 +790,35 @@ public class MarketMentorPlugin extends VitaPlugin
 
     private boolean submitBuy(Opportunity opportunity, int quantity)
     {
+        Instant lockout = buyLimitLockoutUntil.get(opportunity.itemId);
+        if (lockout != null && Instant.now().isBefore(lockout))
+        {
+            return false;
+        }
+
+        Integer geLimit = wikiGeLimitMap.get(opportunity.itemId);
+        if (geLimit != null && geLimit > 0)
+        {
+            int inventory = inventoryAmount(opportunity.itemId);
+            if (inventory >= geLimit)
+            {
+                buyLimitLockoutUntil.put(opportunity.itemId, Instant.now().plus(Duration.ofHours(4)));
+                MessageUtil.sendChatMessage("[Market Mentor] Buy limit reached for " + itemName(opportunity.itemId) + ". Skipping for now.");
+                return false;
+            }
+        }
+
         Position position = positions.computeIfAbsent(opportunity.itemId, k -> new Position());
         position.lastBuyPrice = opportunity.buyPrice;
         pendingBuyPrice.put(opportunity.itemId, opportunity.buyPrice);
         clearNumericDialogueFailsafe();
         boolean ok = GrandExchangeAPI.startBuyOffer(opportunity.itemId, quantity, opportunity.buyPrice) != null;
         clearNumericDialogueFailsafe();
+        if (!ok)
+        {
+            buyLimitLockoutUntil.put(opportunity.itemId, Instant.now().plus(Duration.ofHours(4)));
+            MessageUtil.sendChatMessage("[Market Mentor] Unable to buy " + itemName(opportunity.itemId) + " (possible GE buy limit). Added cooldown.");
+        }
         return ok;
     }
 
@@ -729,7 +828,7 @@ public class MarketMentorPlugin extends VitaPlugin
         boolean timedOut = Duration.between(holdingsSince.get(opportunity.itemId), Instant.now()).getSeconds() >= Math.max(30, config.holdingTimeoutSeconds());
         int sellPrice = timedOut ? opportunity.panicSellPrice : opportunity.normalSellPrice;
         pendingSellPrice.put(opportunity.itemId, sellPrice);
-        int quantity = Math.min(inventoryAmount, opportunity.targetQuantity);
+        int quantity = Math.max(1, inventoryAmount);
         if (quantity <= 0)
         {
             return false;
@@ -873,8 +972,10 @@ public class MarketMentorPlugin extends VitaPlugin
 
                 gpMade += realized;
                 itemsFlipped += sold;
+                double prior = itemPriorityMemory.getOrDefault(itemId, 0.0);
+                double adjustment = realized > 0 ? 0.08 : -0.10;
+                itemPriorityMemory.put(itemId, Math.max(-0.8, Math.min(2.0, prior + adjustment)));
 
-                position.quantity = Math.max(0, position.quantity - sold);
                 long recomputedCost = 0;
                 int recomputedQty = 0;
                 for (BuyLot lot : position.buyLots)
@@ -1011,15 +1112,25 @@ public class MarketMentorPlugin extends VitaPlugin
             return "None";
         }
 
+        String wikiName = wikiItemNameMap.get(itemId);
+        if (wikiName != null && !wikiName.trim().isEmpty())
+        {
+            return wikiName;
+        }
+
         try
         {
             String name = client.getItemDefinition(itemId).getName();
-            return name == null || name.trim().isEmpty() ? "Unknown item" : name;
+            if (name != null && !name.trim().isEmpty())
+            {
+                return name;
+            }
         }
-        catch (Exception ex)
+        catch (Exception ignored)
         {
-            return "Unknown item";
         }
+
+        return "Item #" + itemId;
     }
 
     private JsonElement readJson(String url) throws Exception
@@ -1056,6 +1167,71 @@ public class MarketMentorPlugin extends VitaPlugin
         catch (Exception ex)
         {
             return fallback;
+        }
+    }
+
+    private Set<Integer> parseBlacklist(String csv)
+    {
+        if (csv == null || csv.trim().isEmpty())
+        {
+            return Collections.emptySet();
+        }
+
+        Set<Integer> ids = new HashSet<>();
+        for (String token : csv.split(","))
+        {
+            try
+            {
+                ids.add(Integer.parseInt(token.trim()));
+            }
+            catch (Exception ignored)
+            {
+            }
+        }
+        return ids;
+    }
+
+    private void maybeSendDiscordSummary()
+    {
+        String webhook = config.discordWebhookUrl();
+        if (webhook == null || webhook.trim().isEmpty())
+        {
+            return;
+        }
+
+        WebhookInterval interval = config.discordWebhookInterval();
+        if (interval == null || interval == WebhookInterval.OFF)
+        {
+            return;
+        }
+
+        if (lastWebhookAt != Instant.EPOCH && Duration.between(lastWebhookAt, Instant.now()).compareTo(interval.getDuration()) < 0)
+        {
+            return;
+        }
+
+        try
+        {
+            String content = "Market Mentor Update\nP/L: " + getProfitText()
+                    + "\nProfit/hr: " + getAverageGpPerHourText()
+                    + "\nItems flipped: " + getItemsFlipped()
+                    + "\nBest item: " + getBestSuggestionText();
+            JsonObject payload = new JsonObject();
+            payload.addProperty("content", content);
+
+            HttpURLConnection connection = (HttpURLConnection) new URL(webhook).openConnection();
+            connection.setRequestMethod("POST");
+            connection.setRequestProperty("Content-Type", "application/json");
+            connection.setDoOutput(true);
+            connection.getOutputStream().write(payload.toString().getBytes(StandardCharsets.UTF_8));
+            connection.getOutputStream().flush();
+            connection.getOutputStream().close();
+            connection.getInputStream().close();
+            lastWebhookAt = Instant.now();
+        }
+        catch (Exception ex)
+        {
+            Logger.warn("[MarketMentor] webhook send failed: " + ex.getMessage());
         }
     }
 
