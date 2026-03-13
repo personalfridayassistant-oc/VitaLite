@@ -39,11 +39,8 @@ public class MarketMentorOverlay extends OverlayPanel
         panelComponent.getChildren().add(LineComponent.builder().left("Current").right(plugin.getCurrentSuggestionText()).build());
         panelComponent.getChildren().add(LineComponent.builder().left("Best").right(plugin.getBestSuggestionText()).build());
         panelComponent.getChildren().add(LineComponent.builder().left("P/L").right(plugin.getProfitText()).build());
-<<<<<<< codex/create-trade-suggestion-plugin-using-apis-8mbht4
         panelComponent.getChildren().add(LineComponent.builder().left("Avg GP/hr").right(plugin.getAverageGpPerHourText()).build());
         panelComponent.getChildren().add(LineComponent.builder().left("Items flipped").right(String.valueOf(plugin.getItemsFlipped())).build());
-=======
->>>>>>> main
 
         return super.render(graphics);
     }
