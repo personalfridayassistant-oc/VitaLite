@@ -58,10 +58,9 @@ import java.util.concurrent.ThreadLocalRandom;
 public class MarketMentorPlugin extends VitaPlugin
 {
     private static final String WIKI_LATEST = "https://prices.runescape.wiki/api/v1/osrs/latest";
-    private static final String WIKI_5M = "https://prices.runescape.wiki/api/v1/osrs/5m";
     private static final String WIKI_MAPPING = "https://prices.runescape.wiki/api/v1/osrs/mapping";
     private static final double ESTIMATED_GE_TAX = 0.01;
-    private static final int MARKET_REFRESH_SECONDS = 20;
+    private static final int MARKET_REFRESH_SECONDS = 8;
 
     public static final class PanelOffer
     {
@@ -189,6 +188,9 @@ public class MarketMentorPlugin extends VitaPlugin
     private Instant startTime;
     private long gpMade;
     private long itemsFlipped;
+    private long closedTrades;
+    private long profitableTrades;
+    private long losingTrades;
     private int lastTradedItemId;
     private String statusText = "Idle";
     private String slotText = "0/0";
@@ -213,6 +215,9 @@ public class MarketMentorPlugin extends VitaPlugin
         startTime = Instant.now();
         gpMade = 0;
         itemsFlipped = 0;
+        closedTrades = 0;
+        profitableTrades = 0;
+        losingTrades = 0;
         lastTradedItemId = -1;
         statusText = "Starting";
         currentSuggestion = null;
@@ -264,15 +269,16 @@ public class MarketMentorPlugin extends VitaPlugin
             if (config.autoOpenGe())
             {
                 openGrandExchange();
-                humanPause();
+                humanPauseQuick();
             }
             refreshPanel();
             Delays.tick(Math.max(1, config.loopDelayTicks()));
             return;
         }
 
-        collectFast();
+        collectImmediate();
         pruneAndCancelStaleOffers();
+        collectImmediate();
 
         List<MarketSnapshot> snapshots = getMarketSnapshots();
         Map<Integer, MarketSnapshot> snapshotById = new HashMap<>();
@@ -306,7 +312,7 @@ public class MarketMentorPlugin extends VitaPlugin
             opportunityById.put(o.itemId, o);
         }
 
-        collectFast();
+        collectImmediate();
 
         if (opportunities.isEmpty())
         {
@@ -387,7 +393,7 @@ public class MarketMentorPlugin extends VitaPlugin
                 activeOfferSince.put(opportunity.itemId, Instant.now());
                 statusText = "Selling " + itemName(opportunity.itemId);
                 collectFast();
-                humanPause();
+                humanPauseQuick();
             }
         }
 
@@ -423,8 +429,8 @@ public class MarketMentorPlugin extends VitaPlugin
                     lastTradedItemId = itemId;
                     activeOfferSince.put(itemId, Instant.now());
                     statusText = "Inventory sell " + itemName(itemId);
-                    collectFast();
-                    humanPause();
+                    collectImmediate();
+                    humanPauseQuick();
                 }
             }
         }
@@ -456,8 +462,8 @@ public class MarketMentorPlugin extends VitaPlugin
                     lastTradedItemId = itemId;
                     activeOfferSince.put(itemId, Instant.now());
                     statusText = "Selling held " + itemName(itemId);
-                    collectFast();
-                    humanPause();
+                    collectImmediate();
+                    humanPauseQuick();
                 }
             }
         }
@@ -501,7 +507,7 @@ public class MarketMentorPlugin extends VitaPlugin
                 }
                 else
                 {
-                    continue;
+                    continue; // try next item instead of stalling
                 }
             }
 
@@ -514,7 +520,7 @@ public class MarketMentorPlugin extends VitaPlugin
                 activeOfferSince.put(opportunity.itemId, Instant.now());
                 statusText = "Buying " + itemName(opportunity.itemId);
                 collectFast();
-                humanPause();
+                humanPauseQuick();
             }
         }
 
@@ -564,48 +570,26 @@ public class MarketMentorPlugin extends VitaPlugin
         return actions;
     }
 
-    private void collectFast()
+    private void collectImmediate()
     {
-        if (!shouldCollectNow())
+        if (!GrandExchangeAPI.canCollect())
         {
             return;
         }
 
-        GrandExchangeAPI.collectAll();
-        clearNumericDialogueFailsafe();
+        if (Duration.between(lastCollectAt, Instant.now()).toMillis() < 140)
+        {
+            return;
+        }
+
+        for (int i = 0; i < 2 && GrandExchangeAPI.canCollect(); i++)
+        {
+            GrandExchangeAPI.collectAll();
+            clearNumericDialogueFailsafe();
+            Delays.wait(20);
+        }
+
         lastCollectAt = Instant.now();
-    }
-
-    private boolean shouldCollectNow()
-    {
-        if (Duration.between(lastCollectAt, Instant.now()).toMillis() < 650)
-        {
-            return false;
-        }
-
-        if (!GrandExchangeAPI.canCollect())
-        {
-            return false;
-        }
-
-        for (GrandExchangeOffer offer : GrandExchangeAPI.getOffers())
-        {
-            if (offer == null)
-            {
-                continue;
-            }
-
-            GrandExchangeOfferState state = offer.getState();
-            if (state == GrandExchangeOfferState.BOUGHT
-                    || state == GrandExchangeOfferState.SOLD
-                    || state == GrandExchangeOfferState.CANCELLED_BUY
-                    || state == GrandExchangeOfferState.CANCELLED_SELL)
-            {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     private void clearNumericDialogueFailsafe()
@@ -642,7 +626,7 @@ public class MarketMentorPlugin extends VitaPlugin
                 continue;
             }
 
-            if (snap.minVolume() < minVolume)
+            if (minVolume > 1 && snap.minVolume() < minVolume)
             {
                 continue;
             }
@@ -725,39 +709,30 @@ public class MarketMentorPlugin extends VitaPlugin
         return cachedSnapshots;
     }
 
-    public String getNextApiRefreshText()
-    {
-        if (lastMarketFetchAt == Instant.EPOCH)
-        {
-            return "now";
-        }
-
-        long remaining = MARKET_REFRESH_SECONDS - Duration.between(lastMarketFetchAt, Instant.now()).getSeconds();
-        return remaining <= 0 ? "now" : remaining + "s";
-    }
-
     private List<MarketSnapshot> fetchSnapshots()
     {
         List<MarketSnapshot> snapshots = new ArrayList<>();
         try
         {
             JsonObject latestData = readJson(WIKI_LATEST).getAsJsonObject().getAsJsonObject("data");
-            JsonObject fiveData = readJson(WIKI_5M).getAsJsonObject().getAsJsonObject("data");
-            if (latestData == null || fiveData == null)
+            if (latestData == null)
             {
                 return snapshots;
             }
 
-            List<Integer> candidateIds = selectCandidateIds(fiveData, Math.max(250, config.maxUniverseItems()));
-            for (Integer itemId : candidateIds)
+            for (Map.Entry<String, JsonElement> entry : latestData.entrySet())
             {
-                JsonObject latest = latestData.getAsJsonObject(String.valueOf(itemId));
-                JsonObject five = fiveData.getAsJsonObject(String.valueOf(itemId));
-                if (latest == null || five == null)
+                int itemId;
+                try
+                {
+                    itemId = Integer.parseInt(entry.getKey());
+                }
+                catch (Exception ignored)
                 {
                     continue;
                 }
 
+                JsonObject latest = entry.getValue().getAsJsonObject();
                 int high = getInt(latest, "high", 0);
                 int low = getInt(latest, "low", 0);
                 if (high <= 0 || low <= 0)
@@ -765,15 +740,22 @@ public class MarketMentorPlugin extends VitaPlugin
                     continue;
                 }
 
+                int pseudoVolume = Math.max(1, wikiGeLimitMap.getOrDefault(itemId, 1));
                 snapshots.add(new MarketSnapshot(
                         itemId,
                         high,
                         low,
                         getInt(latest, "highTime", 0),
                         getInt(latest, "lowTime", 0),
-                        getInt(five, "highPriceVolume", 0),
-                        getInt(five, "lowPriceVolume", 0)
+                        pseudoVolume,
+                        pseudoVolume
                 ));
+            }
+
+            snapshots.sort(Comparator.comparingInt((MarketSnapshot s) -> (s.high - s.low)).reversed());
+            if (snapshots.size() > Math.max(250, config.maxUniverseItems()))
+            {
+                snapshots = new ArrayList<>(snapshots.subList(0, Math.max(250, config.maxUniverseItems())));
             }
         }
         catch (Exception ex)
@@ -784,40 +766,10 @@ public class MarketMentorPlugin extends VitaPlugin
         return snapshots;
     }
 
+    // legacy helper retained for compatibility with older code paths.
     private List<Integer> selectCandidateIds(JsonObject fiveMinuteData, int maxItems)
     {
-        List<MarketSnapshot> ranked = new ArrayList<>();
-        for (Map.Entry<String, JsonElement> entry : fiveMinuteData.entrySet())
-        {
-            int itemId;
-            try
-            {
-                itemId = Integer.parseInt(entry.getKey());
-            }
-            catch (Exception ignored)
-            {
-                continue;
-            }
-
-            JsonObject five = entry.getValue().getAsJsonObject();
-            int highVolume = getInt(five, "highPriceVolume", 0);
-            int lowVolume = getInt(five, "lowPriceVolume", 0);
-            if (Math.min(highVolume, lowVolume) <= 0)
-            {
-                continue;
-            }
-
-            ranked.add(new MarketSnapshot(itemId, 1, 1, 0, 0, highVolume, lowVolume));
-        }
-
-        ranked.sort(Comparator.comparingInt(MarketSnapshot::minVolume).reversed());
-
-        List<Integer> ids = new ArrayList<>();
-        for (int i = 0; i < Math.min(maxItems, ranked.size()); i++)
-        {
-            ids.add(ranked.get(i).itemId);
-        }
-        return ids;
+        return Collections.emptyList();
     }
 
     private void refreshMappingIfStale()
@@ -938,7 +890,7 @@ public class MarketMentorPlugin extends VitaPlugin
             {
                 GrandExchangeAPI.abortOffer(offer.getItemId());
                 clearNumericDialogueFailsafe();
-                humanPause();
+                humanPauseQuick();
                 activeOfferSince.put(offer.getItemId(), now);
             }
         }
@@ -1042,7 +994,16 @@ public class MarketMentorPlugin extends VitaPlugin
                 }
 
                 gpMade += realized;
-                itemsFlipped += sold;
+                itemsFlipped += 1;
+                closedTrades += 1;
+                if (realized >= 0)
+                {
+                    profitableTrades += 1;
+                }
+                else
+                {
+                    losingTrades += 1;
+                }
                 double prior = itemPriorityMemory.getOrDefault(itemId, 0.0);
                 double adjustment = realized > 0 ? 0.08 : -0.10;
                 itemPriorityMemory.put(itemId, Math.max(-0.8, Math.min(2.0, prior + adjustment)));
@@ -1181,7 +1142,12 @@ public class MarketMentorPlugin extends VitaPlugin
 
     private void humanPause()
     {
-        Delays.wait(ThreadLocalRandom.current().nextInt(80, 320));
+        humanPauseQuick();
+    }
+
+    private void humanPauseQuick()
+    {
+        Delays.wait(ThreadLocalRandom.current().nextInt(20, 85));
     }
 
     private int applyPercent(int base, double pct, boolean ceil)
@@ -1329,6 +1295,22 @@ public class MarketMentorPlugin extends VitaPlugin
 
         Duration duration = Duration.between(startTime, Instant.now());
         return String.format("%02d:%02d:%02d", duration.toHours(), duration.toMinutesPart(), duration.toSecondsPart());
+    }
+
+    public String getNextApiRefreshText()
+    {
+        if (lastMarketFetchAt == Instant.EPOCH)
+        {
+            return "now";
+        }
+
+        long remaining = MARKET_REFRESH_SECONDS - Duration.between(lastMarketFetchAt, Instant.now()).getSeconds();
+        return remaining <= 0 ? "now" : remaining + "s";
+    }
+
+    public String getTradesText()
+    {
+        return closedTrades + " (W:" + profitableTrades + " L:" + losingTrades + ")";
     }
 
     public String getStatusText() { return statusText; }
