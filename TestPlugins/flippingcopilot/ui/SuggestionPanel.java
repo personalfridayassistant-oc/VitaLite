@@ -3,7 +3,6 @@ package com.flippingcopilot.ui;
 import com.flippingcopilot.config.FlippingCopilotConfig;
 import com.flippingcopilot.controller.GrandExchange;
 import com.flippingcopilot.controller.HighlightController;
-import com.flippingcopilot.controller.PremiumInstanceController;
 import com.flippingcopilot.model.*;
 import com.flippingcopilot.rs.CopilotLoginRS;
 import com.flippingcopilot.ui.flipsdialog.FlipsDialogController;
@@ -50,7 +49,6 @@ public class SuggestionPanel extends JPanel {
     private final HighlightController highlightController;
     private final ItemManager itemManager;
     private final GrandExchange grandExchange;
-    private final PremiumInstanceController premiumInstanceController;
     private final FlipsDialogController flipsDialogController;
     private final ProfitCalculator profitCalculator;
 
@@ -89,7 +87,7 @@ public class SuggestionPanel extends JPanel {
                            ClientThread clientThread,
                            HighlightController highlightController,
                            ItemManager itemManager,
-                           GrandExchange grandExchange,  PremiumInstanceController premiumInstanceController, FlipsDialogController flipsDialogController, ProfitCalculator profitCalculator) {
+                           GrandExchange grandExchange, FlipsDialogController flipsDialogController, ProfitCalculator profitCalculator) {
         this.preferencesPanel = preferencesPanel;
         this.config = config;
         this.suggestionManager = suggestionManager;
@@ -105,7 +103,6 @@ public class SuggestionPanel extends JPanel {
         this.highlightController = highlightController;
         this.itemManager = itemManager;
         this.grandExchange = grandExchange;
-        this.premiumInstanceController = premiumInstanceController;
         this.flipsDialogController = flipsDialogController;
         this.profitCalculator = profitCalculator;
 
@@ -387,24 +384,8 @@ public class SuggestionPanel extends JPanel {
         // Check if message contains "<manage>"
         String displayMessage = message;
         if (message != null && message.contains("<manage>")) {
-            // Replace <manage> with a styled link
-            displayMessage = message.replace("<manage>",
-                    "<a href='#' style='text-decoration:underline'>manage</a>");
-
-            // Add mouse listener if not already present
-            boolean hasListener = false;
-            for (MouseListener listener : suggestionText.getMouseListeners()) {
-                if (listener instanceof ManageClickListener) {
-                    hasListener = true;
-                    break;
-                }
-            }
-
-            if (!hasListener) {
-                suggestionText.addMouseListener(new ManageClickListener());
-                // Make the label show a hand cursor when hovering over it
-                suggestionText.setCursor(new Cursor(Cursor.HAND_CURSOR));
-            }
+            displayMessage = message.replace("<manage>", "");
+            suggestionText.setCursor(new Cursor(Cursor.DEFAULT_CURSOR));
         } else {
             suggestionText.setCursor(new Cursor(Cursor.DEFAULT_CURSOR));
         }
@@ -412,16 +393,6 @@ public class SuggestionPanel extends JPanel {
         suggestionText.setMaximumSize(new Dimension(suggestionText.getPreferredSize().width, Integer.MAX_VALUE));
         suggestionTextContainer.revalidate();
         suggestionTextContainer.repaint();
-    }
-
-    private class ManageClickListener extends MouseAdapter {
-        @Override
-        public void mouseClicked(MouseEvent e) {
-            String text = suggestionText.getText();
-            if (text.contains("manage")) {
-                premiumInstanceController.loadAndOpenPremiumInstanceDialog();
-            }
-        }
     }
 
     public boolean isCollectItemsSuggested() {

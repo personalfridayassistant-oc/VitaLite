@@ -43,8 +43,7 @@ public class MainPanel extends PluginPanel {
         setLayout(cardLayout);
         setBorder(BorderFactory.createEmptyBorder(5, 6, 5, 6));
         add(buildLoggedInView(), "logged-in");
-        add(buildLoggedOutView(), "logged-out");
-        cardLayout.show(this, copilotLoginRS.get().isLoggedIn() ? "logged-in" : "logged-out");
+        cardLayout.show(this, "logged-in");
 
     }
 
@@ -74,14 +73,8 @@ public class MainPanel extends PluginPanel {
             SwingUtilities.invokeLater(this::refresh);
             return;
         }
-        if (copilotLoginRS.get().isLoggedIn()) {
-            showLoggedInView();
-            copilotPanel.refresh();
-        } else {
-            showLoggedOutView();
-            loginPanel.refresh();
-            copilotPanel.suggestionPanel.refresh();
-        }
+        showLoggedInView();
+        copilotPanel.refresh();
     }
 
     private void showLoggedOutView() {
@@ -124,12 +117,6 @@ public class MainPanel extends PluginPanel {
 
 
         if (isLoggedIn) {
-            BufferedImage icon = ImageUtil.loadImageResource(getClass(), UIUtilities.logoutIcon);
-            JLabel logout = buildButton(icon, "Log out", () -> {
-                copilotLoginRS.clear();
-                showLoggedOutView();
-            });
-            topBar.add(logout);
         }
 
         container.add(topBar);

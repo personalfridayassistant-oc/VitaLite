@@ -1,6 +1,5 @@
 package com.flippingcopilot.model;
 
-import joptsimple.internal.Strings;
 import lombok.*;
 
 import java.util.HashMap;
@@ -19,11 +18,11 @@ public class CopilotLoginState {
     public Map<Integer, String> accountIdToDisplayName = new HashMap<>();
 
     public int getUserId() {
-        return loginResponse != null ? loginResponse.getUserId() : -1;
+        return loginResponse != null ? loginResponse.getUserId() : 0;
     }
 
     public boolean isLoggedIn() {
-        return loginResponse != null && !Strings.isNullOrEmpty(loginResponse.jwt);
+        return true;
     }
 
     public Set<Integer> accountIds() {
@@ -31,7 +30,7 @@ public class CopilotLoginState {
     }
 
     public String getJwtToken() {
-        return !isLoggedIn() ? null : loginResponse.getJwt();
+        return loginResponse == null ? "offline" : loginResponse.getJwt();
     }
 
     public Integer getAccountId(String displayName) {
