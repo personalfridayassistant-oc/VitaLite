@@ -15,6 +15,7 @@ import com.tonic.api.widgets.InventoryAPI;
 import com.tonic.data.wrappers.ItemEx;
 import com.tonic.data.wrappers.NpcEx;
 import com.tonic.queries.NpcQuery;
+import com.tonic.util.MessageUtil;
 import com.tonic.util.VitaPlugin;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
@@ -160,6 +161,7 @@ public class MarketMentorPlugin extends VitaPlugin
     private final Set<Integer> trackedItemIds = new HashSet<>();
     private final List<PanelOffer> panelOffers = new ArrayList<>();
     private final Map<Integer, Boolean> wikiMembershipMap = new HashMap<>();
+    private final Map<Integer, Integer> wikiGeLimitMap = new HashMap<>();
 
     private Instant lastMappingRefresh = Instant.EPOCH;
     private Instant startTime;
@@ -171,6 +173,7 @@ public class MarketMentorPlugin extends VitaPlugin
     private String coinsText = "0";
     private Opportunity currentSuggestion;
     private Opportunity bestSuggestion;
+    private int lastAnnouncedSuggestionId = -1;
 
     @Provides
     MarketMentorConfig provideConfig(ConfigManager configManager)
@@ -188,6 +191,7 @@ public class MarketMentorPlugin extends VitaPlugin
         statusText = "Starting";
         currentSuggestion = null;
         bestSuggestion = null;
+        lastAnnouncedSuggestionId = -1;
         overlayManager.add(overlay);
 
         BufferedImage icon = ImageUtil.loadImageResource(getClass(), "/graph.png");
@@ -254,6 +258,14 @@ public class MarketMentorPlugin extends VitaPlugin
                 statusText = "Using relaxed failsafe strategy";
             }
         }
+        if (opportunities.isEmpty())
+        {
+            opportunities = buildFallbackSpreadOpportunities(snapshots);
+            if (!opportunities.isEmpty())
+            {
+                statusText = "Using spread-only failsafe strategy";
+            }
+        }
 
         opportunities.sort(Comparator.comparingDouble((Opportunity o) -> o.score).reversed());
         updatePanelOffers(opportunities);
@@ -268,6 +280,7 @@ public class MarketMentorPlugin extends VitaPlugin
         }
 
         currentSuggestion = opportunities.get(0);
+        announceSuggestionIfChanged(currentSuggestion);
         if (bestSuggestion == null || currentSuggestion.netRoi > bestSuggestion.netRoi)
         {
             bestSuggestion = currentSuggestion;
@@ -455,6 +468,29 @@ public class MarketMentorPlugin extends VitaPlugin
         return opportunities;
     }
 
+
+    private List<Opportunity> buildFallbackSpreadOpportunities(List<MarketSnapshot> snapshots)
+    {
+        List<Opportunity> opportunities = new ArrayList<>();
+        for (MarketSnapshot snap : snapshots)
+        {
+            if (!isItemBuyableForCurrentAccount(snap.itemId) || snap.low <= 0 || snap.high <= snap.low)
+            {
+                continue;
+            }
+
+            int volume = Math.max(1, snap.minVolume());
+            int spread = Math.max(1, snap.high - snap.low);
+            int buyPrice = Math.max(1, snap.low);
+            int sellPrice = Math.max(buyPrice + 1, snap.high);
+            int qty = Math.max(1, Math.min(5, Math.max(1, config.maxGpPerTrade()) / buyPrice));
+            double netRoi = (((sellPrice * (1.0 - ESTIMATED_GE_TAX)) - buyPrice) / Math.max(1.0, buyPrice));
+            double score = spread * Math.log10(Math.max(10, volume));
+            opportunities.add(new Opportunity(snap.itemId, buyPrice, sellPrice, buyPrice, qty, spread, volume, netRoi, score));
+        }
+        return opportunities;
+    }
+
     private List<MarketSnapshot> fetchSnapshots()
     {
         List<MarketSnapshot> snapshots = new ArrayList<>();
@@ -550,6 +586,7 @@ public class MarketMentorPlugin extends VitaPlugin
         {
             JsonArray mappingArray = readJson(WIKI_MAPPING).getAsJsonArray();
             wikiMembershipMap.clear();
+            wikiGeLimitMap.clear();
             for (JsonElement element : mappingArray)
             {
                 JsonObject obj = element.getAsJsonObject();
@@ -559,7 +596,9 @@ public class MarketMentorPlugin extends VitaPlugin
                     continue;
                 }
                 boolean members = obj.has("members") && !obj.get("members").isJsonNull() && obj.get("members").getAsBoolean();
+                int geLimit = getInt(obj, "limit", 0);
                 wikiMembershipMap.put(id, members);
+                wikiGeLimitMap.put(id, geLimit);
             }
             lastMappingRefresh = Instant.now();
         }
@@ -627,6 +666,21 @@ public class MarketMentorPlugin extends VitaPlugin
                 activeOfferSince.put(offer.getItemId(), now);
             }
         }
+    }
+
+
+    private void announceSuggestionIfChanged(Opportunity suggestion)
+    {
+        if (suggestion == null || suggestion.itemId <= 0 || suggestion.itemId == lastAnnouncedSuggestionId)
+        {
+            return;
+        }
+
+        lastAnnouncedSuggestionId = suggestion.itemId;
+        MessageUtil.sendChatMessage("[Market Mentor] New suggestion: " + itemName(suggestion.itemId)
+                + " | ROI " + String.format("%.2f%%", suggestion.netRoi * 100.0)
+                + " | Spread " + String.format("%,d", suggestion.spread)
+                + " | Vol " + String.format("%,d", suggestion.volume));
     }
 
     private void trackTopItems(List<Opportunity> opportunities)
@@ -706,28 +760,40 @@ public class MarketMentorPlugin extends VitaPlugin
     {
         try
         {
-            boolean membersItem = wikiMembershipMap.getOrDefault(itemId, false);
-            if (!WorldsAPI.inMembersWorld() && membersItem)
+            boolean inMembersWorld = WorldsAPI.inMembersWorld();
+            Boolean membersMapped = wikiMembershipMap.get(itemId);
+            Integer geLimit = wikiGeLimitMap.get(itemId);
+
+            if (!inMembersWorld && Boolean.TRUE.equals(membersMapped))
+            {
+                return false;
+            }
+
+            if (geLimit != null && geLimit <= 0)
             {
                 return false;
             }
 
             ItemComposition definition = client.getItemDefinition(itemId);
-            if (definition == null || !definition.isTradeable())
+            if (definition != null)
             {
-                return false;
+                if (!inMembersWorld && definition.isMembers())
+                {
+                    return false;
+                }
+
+                if (definition.isTradeable())
+                {
+                    return true;
+                }
             }
 
-            if (!WorldsAPI.inMembersWorld() && definition.isMembers())
-            {
-                return false;
-            }
-
-            return true;
+            return geLimit != null ? geLimit > 0 : true;
         }
         catch (Exception ex)
         {
-            return false;
+            Integer geLimit = wikiGeLimitMap.get(itemId);
+            return geLimit == null || geLimit > 0;
         }
     }
 
