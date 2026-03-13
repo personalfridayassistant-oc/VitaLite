@@ -336,6 +336,16 @@ public class HighlightController {
         });
     }
 
+    public java.util.List<Widget> getHighlightedWidgets() {
+        java.util.List<Widget> widgets = new java.util.ArrayList<>();
+        for (WidgetHighlightOverlay overlay : highlightOverlays) {
+            if (overlay != null && overlay.getWidget() != null) {
+                widgets.add(overlay.getWidget());
+            }
+        }
+        return widgets;
+    }
+
     private void clearOverlaysIfCurrentGeneration(int expectedGeneration) {
         if (generation.get() != expectedGeneration) {
             return;
