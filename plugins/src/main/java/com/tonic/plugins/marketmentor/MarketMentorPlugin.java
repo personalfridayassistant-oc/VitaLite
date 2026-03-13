@@ -19,6 +19,7 @@ import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.api.GrandExchangeOffer;
 import net.runelite.api.GrandExchangeOfferState;
+<<<<<<< codex/create-trade-suggestion-plugin-using-apis-8mbht4
 import net.runelite.api.ItemComposition;
 import net.runelite.api.gameval.ItemID;
 import net.runelite.client.config.ConfigManager;
@@ -30,6 +31,14 @@ import net.runelite.client.util.ImageUtil;
 
 import javax.inject.Inject;
 import java.awt.image.BufferedImage;
+=======
+import net.runelite.api.gameval.ItemID;
+import net.runelite.client.config.ConfigManager;
+import net.runelite.client.plugins.PluginDescriptor;
+import net.runelite.client.ui.overlay.OverlayManager;
+
+import javax.inject.Inject;
+>>>>>>> main
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
@@ -57,6 +66,7 @@ public class MarketMentorPlugin extends VitaPlugin
     private static final String WIKI_5M = "https://prices.runescape.wiki/api/v1/osrs/5m";
     private static final double ESTIMATED_GE_TAX = 0.01;
 
+<<<<<<< codex/create-trade-suggestion-plugin-using-apis-8mbht4
     public static final class PanelOffer
     {
         private final int itemId;
@@ -81,6 +91,8 @@ public class MarketMentorPlugin extends VitaPlugin
         public String getSpreadText() { return spreadText; }
     }
 
+=======
+>>>>>>> main
     private static final class MarketSnapshot
     {
         private final int itemId;
@@ -115,20 +127,30 @@ public class MarketMentorPlugin extends VitaPlugin
         private final int normalSellPrice;
         private final int panicSellPrice;
         private final int targetQuantity;
+<<<<<<< codex/create-trade-suggestion-plugin-using-apis-8mbht4
         private final int spread;
         private final int volume;
         private final double netRoi;
         private final double score;
 
         private Opportunity(int itemId, int buyPrice, int normalSellPrice, int panicSellPrice, int targetQuantity, int spread, int volume, double netRoi, double score)
+=======
+        private final double netRoi;
+        private final double score;
+
+        private Opportunity(int itemId, int buyPrice, int normalSellPrice, int panicSellPrice, int targetQuantity, double netRoi, double score)
+>>>>>>> main
         {
             this.itemId = itemId;
             this.buyPrice = buyPrice;
             this.normalSellPrice = normalSellPrice;
             this.panicSellPrice = panicSellPrice;
             this.targetQuantity = targetQuantity;
+<<<<<<< codex/create-trade-suggestion-plugin-using-apis-8mbht4
             this.spread = spread;
             this.volume = volume;
+=======
+>>>>>>> main
             this.netRoi = netRoi;
             this.score = score;
         }
@@ -144,6 +166,7 @@ public class MarketMentorPlugin extends VitaPlugin
 
     @Inject
     private MarketMentorConfig config;
+<<<<<<< codex/create-trade-suggestion-plugin-using-apis-8mbht4
     @Inject
     private Client client;
     @Inject
@@ -156,17 +179,34 @@ public class MarketMentorPlugin extends VitaPlugin
     private ClientToolbar clientToolbar;
 
     private NavigationButton navigationButton;
+=======
+
+    @Inject
+    private Client client;
+
+    @Inject
+    private OverlayManager overlayManager;
+
+    @Inject
+    private MarketMentorOverlay overlay;
+>>>>>>> main
 
     private final Map<Integer, Instant> activeOfferSince = new HashMap<>();
     private final Map<Integer, Instant> holdingsSince = new HashMap<>();
     private final Map<Integer, Integer> lastInventory = new HashMap<>();
     private final Map<Integer, Position> positions = new HashMap<>();
     private final Set<Integer> trackedItemIds = new HashSet<>();
+<<<<<<< codex/create-trade-suggestion-plugin-using-apis-8mbht4
     private final List<PanelOffer> panelOffers = new ArrayList<>();
 
     private Instant startTime;
     private long gpMade;
     private long itemsFlipped;
+=======
+
+    private Instant startTime;
+    private long gpMade;
+>>>>>>> main
     private String statusText = "Idle";
     private String slotText = "0/0";
     private String coinsText = "0";
@@ -184,11 +224,15 @@ public class MarketMentorPlugin extends VitaPlugin
     {
         startTime = Instant.now();
         gpMade = 0;
+<<<<<<< codex/create-trade-suggestion-plugin-using-apis-8mbht4
         itemsFlipped = 0;
+=======
+>>>>>>> main
         statusText = "Starting";
         currentSuggestion = null;
         bestSuggestion = null;
         overlayManager.add(overlay);
+<<<<<<< codex/create-trade-suggestion-plugin-using-apis-8mbht4
 
         BufferedImage icon = ImageUtil.loadImageResource(getClass(), "/graph.png");
         navigationButton = NavigationButton.builder()
@@ -197,17 +241,22 @@ public class MarketMentorPlugin extends VitaPlugin
                 .panel(panel)
                 .build();
         clientToolbar.addNavigation(navigationButton);
+=======
+>>>>>>> main
     }
 
     @Override
     protected void shutDown()
     {
         overlayManager.remove(overlay);
+<<<<<<< codex/create-trade-suggestion-plugin-using-apis-8mbht4
         if (navigationButton != null)
         {
             clientToolbar.removeNavigation(navigationButton);
             navigationButton = null;
         }
+=======
+>>>>>>> main
         statusText = "Stopped";
     }
 
@@ -217,7 +266,10 @@ public class MarketMentorPlugin extends VitaPlugin
         if (!config.enabled() || client.getGameState() != GameState.LOGGED_IN || client.getLocalPlayer() == null)
         {
             statusText = "Disabled / not logged in";
+<<<<<<< codex/create-trade-suggestion-plugin-using-apis-8mbht4
             refreshPanel();
+=======
+>>>>>>> main
             return;
         }
 
@@ -234,7 +286,10 @@ public class MarketMentorPlugin extends VitaPlugin
                 openGrandExchange();
                 humanPause();
             }
+<<<<<<< codex/create-trade-suggestion-plugin-using-apis-8mbht4
             refreshPanel();
+=======
+>>>>>>> main
             Delays.tick(Math.max(1, config.loopDelayTicks()));
             return;
         }
@@ -249,13 +304,19 @@ public class MarketMentorPlugin extends VitaPlugin
 
         List<Opportunity> opportunities = buildOpportunities(fetchSnapshots());
         opportunities.sort(Comparator.comparingDouble((Opportunity o) -> o.score).reversed());
+<<<<<<< codex/create-trade-suggestion-plugin-using-apis-8mbht4
         updatePanelOffers(opportunities);
+=======
+>>>>>>> main
 
         if (opportunities.isEmpty())
         {
             statusText = "No viable opportunities";
             currentSuggestion = null;
+<<<<<<< codex/create-trade-suggestion-plugin-using-apis-8mbht4
             refreshPanel();
+=======
+>>>>>>> main
             Delays.tick(Math.max(1, config.loopDelayTicks()));
             return;
         }
@@ -274,7 +335,10 @@ public class MarketMentorPlugin extends VitaPlugin
             statusText = "No actionable trade";
         }
 
+<<<<<<< codex/create-trade-suggestion-plugin-using-apis-8mbht4
         refreshPanel();
+=======
+>>>>>>> main
         ClientScriptAPI.closeNumericInputDialogue();
         Delays.tick(Math.max(1, config.loopDelayTicks()));
     }
@@ -382,7 +446,11 @@ public class MarketMentorPlugin extends VitaPlugin
 
         for (MarketSnapshot snap : snapshots)
         {
+<<<<<<< codex/create-trade-suggestion-plugin-using-apis-8mbht4
             if (!isItemBuyableForCurrentAccount(snap.itemId) || snap.low <= 0 || snap.high <= snap.low)
+=======
+            if (isMembersOnlyItemOnFreeWorld(snap.itemId) || snap.low <= 0 || snap.high <= snap.low)
+>>>>>>> main
             {
                 continue;
             }
@@ -415,11 +483,18 @@ public class MarketMentorPlugin extends VitaPlugin
                 continue;
             }
 
+<<<<<<< codex/create-trade-suggestion-plugin-using-apis-8mbht4
             int volume = snap.minVolume();
             int spread = Math.max(1, snap.high - snap.low);
             int targetQuantity = Math.max(1, Math.min(volume / 2, Math.max(1, config.maxGpPerTrade()) / Math.max(1, buyPrice)));
             double score = (netPerItem * Math.log10(Math.max(10, volume))) + (spread * 0.01);
             opportunities.add(new Opportunity(snap.itemId, buyPrice, sellPrice, panicSell, targetQuantity, spread, volume, netRoi, score));
+=======
+            int targetQuantity = Math.max(1, Math.min(snap.minVolume() / 2, Math.max(1, config.maxGpPerTrade()) / Math.max(1, buyPrice)));
+            double spreadGp = Math.max(1.0, snap.high - snap.low);
+            double score = (netPerItem * Math.log10(Math.max(10, snap.minVolume()))) + (spreadGp * 0.01);
+            opportunities.add(new Opportunity(snap.itemId, buyPrice, sellPrice, panicSell, targetQuantity, netRoi, score));
+>>>>>>> main
         }
 
         return opportunities;
@@ -476,6 +551,10 @@ public class MarketMentorPlugin extends VitaPlugin
     private List<Integer> selectCandidateIds(JsonObject fiveMinuteData, int maxItems)
     {
         List<MarketSnapshot> ranked = new ArrayList<>();
+<<<<<<< codex/create-trade-suggestion-plugin-using-apis-8mbht4
+=======
+
+>>>>>>> main
         for (Map.Entry<String, JsonElement> entry : fiveMinuteData.entrySet())
         {
             int itemId;
@@ -491,7 +570,12 @@ public class MarketMentorPlugin extends VitaPlugin
             JsonObject five = entry.getValue().getAsJsonObject();
             int highVolume = getInt(five, "highPriceVolume", 0);
             int lowVolume = getInt(five, "lowPriceVolume", 0);
+<<<<<<< codex/create-trade-suggestion-plugin-using-apis-8mbht4
             if (Math.min(highVolume, lowVolume) <= 0)
+=======
+            int minVolume = Math.min(highVolume, lowVolume);
+            if (minVolume <= 0)
+>>>>>>> main
             {
                 continue;
             }
@@ -506,6 +590,10 @@ public class MarketMentorPlugin extends VitaPlugin
         {
             ids.add(ranked.get(i).itemId);
         }
+<<<<<<< codex/create-trade-suggestion-plugin-using-apis-8mbht4
+=======
+
+>>>>>>> main
         return ids;
     }
 
@@ -578,6 +666,7 @@ public class MarketMentorPlugin extends VitaPlugin
         }
     }
 
+<<<<<<< codex/create-trade-suggestion-plugin-using-apis-8mbht4
     private void updatePanelOffers(List<Opportunity> opportunities)
     {
         panelOffers.clear();
@@ -600,6 +689,8 @@ public class MarketMentorPlugin extends VitaPlugin
         panel.refresh(statusText, getProfitText(), getAverageGpPerHourText(), (int) itemsFlipped, new ArrayList<>(panelOffers));
     }
 
+=======
+>>>>>>> main
     private void openGrandExchange()
     {
         NpcEx clerk = new NpcQuery().withNameContains("Grand Exchange Clerk").sortNearest().first();
@@ -634,7 +725,10 @@ public class MarketMentorPlugin extends VitaPlugin
                 int avgCost = position.quantity > 0 ? (int) Math.max(1L, position.totalCost / position.quantity) : Math.max(1, position.lastBuyPrice);
                 int sellPrice = Math.max(1, position.lastSellPrice);
                 gpMade += (long) sold * (sellPrice - avgCost);
+<<<<<<< codex/create-trade-suggestion-plugin-using-apis-8mbht4
                 itemsFlipped += sold;
+=======
+>>>>>>> main
 
                 position.quantity = Math.max(0, position.quantity - sold);
                 position.totalCost = Math.max(0L, position.totalCost - (long) sold * avgCost);
@@ -648,6 +742,7 @@ public class MarketMentorPlugin extends VitaPlugin
         }
     }
 
+<<<<<<< codex/create-trade-suggestion-plugin-using-apis-8mbht4
     private boolean isItemBuyableForCurrentAccount(int itemId)
     {
         try
@@ -674,6 +769,17 @@ public class MarketMentorPlugin extends VitaPlugin
         {
             return false;
         }
+=======
+    private boolean isMembersOnlyItemOnFreeWorld(int itemId)
+    {
+        if (WorldsAPI.inMembersWorld())
+        {
+            return false;
+        }
+
+        String name = itemName(itemId);
+        return name.endsWith("(Members)") || name.contains("Members");
+>>>>>>> main
     }
 
     private int getFreeEligibleSlots()
@@ -811,6 +917,7 @@ public class MarketMentorPlugin extends VitaPlugin
     public String getCoinsText() { return coinsText; }
     public String getProfitText() { return String.format("%,d", gpMade); }
 
+<<<<<<< codex/create-trade-suggestion-plugin-using-apis-8mbht4
     public String getAverageGpPerHourText()
     {
         if (startTime == null)
@@ -828,6 +935,8 @@ public class MarketMentorPlugin extends VitaPlugin
         return (int) itemsFlipped;
     }
 
+=======
+>>>>>>> main
     public String getCurrentSuggestionText()
     {
         if (currentSuggestion == null)
