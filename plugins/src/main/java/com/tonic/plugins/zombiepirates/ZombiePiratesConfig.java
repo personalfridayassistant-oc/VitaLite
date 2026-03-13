@@ -4,7 +4,6 @@ import net.runelite.client.config.Config;
 import net.runelite.client.config.ConfigSection;
 import net.runelite.client.config.ConfigGroup;
 import net.runelite.client.config.ConfigItem;
-import net.runelite.client.config.Button;
 
 @ConfigGroup("zombiePirates")
 public interface ZombiePiratesConfig extends Config
@@ -22,8 +21,14 @@ public interface ZombiePiratesConfig extends Config
     @ConfigItem(keyName = "gearList", name = "Gear list", description = "Comma-separated gear names to equip", position = 1, section = setupSection)
     default String gearList() { return "Salve amulet(ei), Void ranger helm, Elite void top, Elite void robe, Void knight gloves, Venator bow"; }
 
-    @ConfigItem(keyName = "copyGear", name = "Copy worn gear", description = "Copies currently worn equipment into Gear list", position = 2, section = setupSection)
-    default Button copyGear() { return new Button(); }
+    @ConfigItem(
+            keyName = "copyGearHint",
+            name = "Copy worn gear",
+            description = "Button type is unavailable in this client API version; copy gear CSV manually for now",
+            position = 2,
+            section = setupSection
+    )
+    default String copyGearHint() { return "Manual copy only"; }
 
     @ConfigItem(keyName = "inventoryList", name = "Inventory list", description = "CSV in Name:Amount format used to prepare inventory", position = 3, section = setupSection)
     default String inventoryList()
@@ -31,8 +36,14 @@ public interface ZombiePiratesConfig extends Config
         return "Blighted manta ray:8, Blighted super restore:4, Burning amulet:1, Royal seed pod:1";
     }
 
-    @ConfigItem(keyName = "copyInventory", name = "Copy inventory", description = "Copies current inventory into Inventory list", position = 4, section = setupSection)
-    default Button copyInventory() { return new Button(); }
+    @ConfigItem(
+            keyName = "copyInventoryHint",
+            name = "Copy inventory",
+            description = "Button type is unavailable in this client API version; copy inventory CSV manually for now",
+            position = 4,
+            section = setupSection
+    )
+    default String copyInventoryHint() { return "Manual copy only"; }
 
     @ConfigItem(keyName = "foodName", name = "Food item", description = "Primary food item name", position = 5)
     default String foodName() { return "Blighted manta ray"; }
