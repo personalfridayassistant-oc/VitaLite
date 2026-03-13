@@ -54,6 +54,7 @@ public class MarketMentorPlugin extends VitaPlugin
 
     private static final class MarketSnapshot
     {
+        private final int itemId;
         private final int high;
         private final int low;
         private final int highTime;
@@ -61,14 +62,20 @@ public class MarketMentorPlugin extends VitaPlugin
         private final int highVolume;
         private final int lowVolume;
 
-        private MarketSnapshot(int high, int low, int highTime, int lowTime, int highVolume, int lowVolume)
+        private MarketSnapshot(int itemId, int high, int low, int highTime, int lowTime, int highVolume, int lowVolume)
         {
+            this.itemId = itemId;
             this.high = high;
             this.low = low;
             this.highTime = highTime;
             this.lowTime = lowTime;
             this.highVolume = highVolume;
             this.lowVolume = lowVolume;
+        }
+
+        private int minVolume()
+        {
+            return Math.min(highVolume, lowVolume);
         }
     }
 
@@ -118,6 +125,7 @@ public class MarketMentorPlugin extends VitaPlugin
     private final Map<Integer, Instant> holdingsSince = new HashMap<>();
     private final Map<Integer, Integer> lastInventory = new HashMap<>();
     private final Map<Integer, Position> positions = new HashMap<>();
+    private final Set<Integer> trackedItemIds = new HashSet<>();
 
     private Instant startTime;
     private long gpMade;
@@ -160,11 +168,9 @@ public class MarketMentorPlugin extends VitaPlugin
             return;
         }
 
-        Set<Integer> candidates = parseItemIds(config.candidateItemIds());
-        updatePnlTracking(candidates);
+        updatePnlTracking();
         updateSlotText();
         coinsText = String.format("%,d", inventoryAmount(ItemID.COINS));
-
         ClientScriptAPI.closeNumericInputDialogue();
 
         if (!GrandExchangeAPI.isOpen())
@@ -187,15 +193,7 @@ public class MarketMentorPlugin extends VitaPlugin
 
         pruneAndCancelStaleOffers();
 
-        if (candidates.isEmpty())
-        {
-            statusText = "No candidate ids";
-            Delays.tick(Math.max(1, config.loopDelayTicks()));
-            return;
-        }
-
-        Map<Integer, MarketSnapshot> snapshots = fetchSnapshots(candidates);
-        List<Opportunity> opportunities = buildOpportunities(candidates, snapshots);
+        List<Opportunity> opportunities = buildOpportunities(fetchSnapshots());
         opportunities.sort(Comparator.comparingDouble((Opportunity o) -> o.score).reversed());
 
         if (opportunities.isEmpty())
@@ -211,6 +209,8 @@ public class MarketMentorPlugin extends VitaPlugin
         {
             bestSuggestion = currentSuggestion;
         }
+
+        trackTopItems(opportunities);
 
         int actions = executeTrades(opportunities);
         if (actions == 0)
@@ -233,7 +233,6 @@ public class MarketMentorPlugin extends VitaPlugin
         }
 
         int actions = 0;
-
         for (Opportunity opportunity : opportunities)
         {
             if (freeSlots <= 0)
@@ -245,13 +244,13 @@ public class MarketMentorPlugin extends VitaPlugin
                 continue;
             }
 
-            int inventoryAmount = inventoryAmount(opportunity.itemId);
-            if (inventoryAmount <= 0)
+            int invAmount = inventoryAmount(opportunity.itemId);
+            if (invAmount <= 0)
             {
                 continue;
             }
 
-            if (submitSell(opportunity, inventoryAmount))
+            if (submitSell(opportunity, invAmount))
             {
                 actions++;
                 freeSlots--;
@@ -270,12 +269,7 @@ public class MarketMentorPlugin extends VitaPlugin
         List<Opportunity> buyList = new ArrayList<>();
         for (Opportunity opportunity : opportunities)
         {
-            if (hasActiveOffer(opportunity.itemId))
-            {
-                continue;
-            }
-
-            if (inventoryAmount(opportunity.itemId) >= opportunity.targetQuantity)
+            if (hasActiveOffer(opportunity.itemId) || inventoryAmount(opportunity.itemId) >= opportunity.targetQuantity)
             {
                 continue;
             }
@@ -298,9 +292,9 @@ public class MarketMentorPlugin extends VitaPlugin
             }
 
             int splitsLeft = Math.max(1, buyTargets - i);
-            int perItemSplitBudget = Math.max(1, coins / splitsLeft);
+            int splitBudget = Math.max(1, coins / splitsLeft);
             int riskCap = (int) Math.max(1, Math.floor(coins * (Math.max(1.0, config.maxBudgetPct()) / 100.0)));
-            int budget = Math.min(Math.min(perItemSplitBudget, riskCap), Math.max(1, config.maxGpPerTrade()));
+            int budget = Math.min(Math.min(splitBudget, riskCap), Math.max(1, config.maxGpPerTrade()));
             int qty = Math.min(needed, budget / Math.max(1, opportunity.buyPrice));
             if (qty <= 0)
             {
@@ -311,8 +305,7 @@ public class MarketMentorPlugin extends VitaPlugin
             {
                 actions++;
                 freeSlots--;
-                int spent = qty * opportunity.buyPrice;
-                coins = Math.max(0, coins - spent);
+                coins = Math.max(0, coins - (qty * opportunity.buyPrice));
                 activeOfferSince.put(opportunity.itemId, Instant.now());
                 statusText = "Buying " + itemName(opportunity.itemId);
                 humanPause();
@@ -322,7 +315,7 @@ public class MarketMentorPlugin extends VitaPlugin
         return actions;
     }
 
-    private List<Opportunity> buildOpportunities(Set<Integer> candidates, Map<Integer, MarketSnapshot> snapshots)
+    private List<Opportunity> buildOpportunities(List<MarketSnapshot> snapshots)
     {
         List<Opportunity> opportunities = new ArrayList<>();
         int minVolume = Math.max(1, config.minFiveMinuteVolume());
@@ -330,21 +323,14 @@ public class MarketMentorPlugin extends VitaPlugin
         double minNetRoi = Math.max(0.1, config.minNetRoiPct()) / 100.0;
         long now = System.currentTimeMillis() / 1000L;
 
-        for (int itemId : candidates)
+        for (MarketSnapshot snap : snapshots)
         {
-            if (isMembersOnlyItemOnFreeWorld(itemId))
+            if (isMembersOnlyItemOnFreeWorld(snap.itemId) || snap.low <= 0 || snap.high <= snap.low)
             {
                 continue;
             }
 
-            MarketSnapshot snap = snapshots.get(itemId);
-            if (snap == null || snap.low <= 0 || snap.high <= snap.low)
-            {
-                continue;
-            }
-
-            int volume = Math.min(snap.lowVolume, snap.highVolume);
-            if (volume < minVolume)
+            if (snap.minVolume() < minVolume)
             {
                 continue;
             }
@@ -372,34 +358,48 @@ public class MarketMentorPlugin extends VitaPlugin
                 continue;
             }
 
-            int targetQuantity = Math.max(1, Math.min(volume / 2, Math.max(1, config.maxGpPerTrade()) / Math.max(1, buyPrice)));
-            double score = netPerItem * Math.log10(Math.max(10, volume));
-            opportunities.add(new Opportunity(itemId, buyPrice, sellPrice, panicSell, targetQuantity, netRoi, score));
+            int targetQuantity = Math.max(1, Math.min(snap.minVolume() / 2, Math.max(1, config.maxGpPerTrade()) / Math.max(1, buyPrice)));
+            double spreadGp = Math.max(1.0, snap.high - snap.low);
+            double score = (netPerItem * Math.log10(Math.max(10, snap.minVolume()))) + (spreadGp * 0.01);
+            opportunities.add(new Opportunity(snap.itemId, buyPrice, sellPrice, panicSell, targetQuantity, netRoi, score));
         }
 
         return opportunities;
     }
 
-    private Map<Integer, MarketSnapshot> fetchSnapshots(Set<Integer> candidates)
+    private List<MarketSnapshot> fetchSnapshots()
     {
-        Map<Integer, MarketSnapshot> snapshots = new HashMap<>();
+        List<MarketSnapshot> snapshots = new ArrayList<>();
         try
         {
             JsonObject latestData = readJson(WIKI_LATEST).getAsJsonObject().getAsJsonObject("data");
-            JsonObject fiveMinuteData = readJson(WIKI_5M).getAsJsonObject().getAsJsonObject("data");
-
-            for (int itemId : candidates)
+            JsonObject fiveData = readJson(WIKI_5M).getAsJsonObject().getAsJsonObject("data");
+            if (latestData == null || fiveData == null)
             {
-                JsonObject latest = latestData == null ? null : latestData.getAsJsonObject(String.valueOf(itemId));
-                JsonObject five = fiveMinuteData == null ? null : fiveMinuteData.getAsJsonObject(String.valueOf(itemId));
+                return snapshots;
+            }
+
+            List<Integer> candidateIds = selectCandidateIds(fiveData, Math.max(250, config.maxUniverseItems()));
+            for (Integer itemId : candidateIds)
+            {
+                JsonObject latest = latestData.getAsJsonObject(String.valueOf(itemId));
+                JsonObject five = fiveData.getAsJsonObject(String.valueOf(itemId));
                 if (latest == null || five == null)
                 {
                     continue;
                 }
 
-                snapshots.put(itemId, new MarketSnapshot(
-                        getInt(latest, "high", 0),
-                        getInt(latest, "low", 0),
+                int high = getInt(latest, "high", 0);
+                int low = getInt(latest, "low", 0);
+                if (high <= 0 || low <= 0)
+                {
+                    continue;
+                }
+
+                snapshots.add(new MarketSnapshot(
+                        itemId,
+                        high,
+                        low,
                         getInt(latest, "highTime", 0),
                         getInt(latest, "lowTime", 0),
                         getInt(five, "highPriceVolume", 0),
@@ -411,34 +411,74 @@ public class MarketMentorPlugin extends VitaPlugin
         {
             Logger.warn("[MarketMentor] market fetch failed: " + ex.getMessage());
         }
+
         return snapshots;
     }
 
-    private boolean submitBuy(Opportunity o, int qty)
+    private List<Integer> selectCandidateIds(JsonObject fiveMinuteData, int maxItems)
     {
-        Position p = positions.computeIfAbsent(o.itemId, k -> new Position());
-        p.lastBuyPrice = o.buyPrice;
+        List<MarketSnapshot> ranked = new ArrayList<>();
+
+        for (Map.Entry<String, JsonElement> entry : fiveMinuteData.entrySet())
+        {
+            int itemId;
+            try
+            {
+                itemId = Integer.parseInt(entry.getKey());
+            }
+            catch (Exception ignored)
+            {
+                continue;
+            }
+
+            JsonObject five = entry.getValue().getAsJsonObject();
+            int highVolume = getInt(five, "highPriceVolume", 0);
+            int lowVolume = getInt(five, "lowPriceVolume", 0);
+            int minVolume = Math.min(highVolume, lowVolume);
+            if (minVolume <= 0)
+            {
+                continue;
+            }
+
+            ranked.add(new MarketSnapshot(itemId, 1, 1, 0, 0, highVolume, lowVolume));
+        }
+
+        ranked.sort(Comparator.comparingInt(MarketSnapshot::minVolume).reversed());
+
+        List<Integer> ids = new ArrayList<>();
+        for (int i = 0; i < Math.min(maxItems, ranked.size()); i++)
+        {
+            ids.add(ranked.get(i).itemId);
+        }
+
+        return ids;
+    }
+
+    private boolean submitBuy(Opportunity opportunity, int quantity)
+    {
+        Position position = positions.computeIfAbsent(opportunity.itemId, k -> new Position());
+        position.lastBuyPrice = opportunity.buyPrice;
         ClientScriptAPI.closeNumericInputDialogue();
-        boolean ok = GrandExchangeAPI.startBuyOffer(o.itemId, qty, o.buyPrice) != null;
+        boolean ok = GrandExchangeAPI.startBuyOffer(opportunity.itemId, quantity, opportunity.buyPrice) != null;
         ClientScriptAPI.closeNumericInputDialogue();
         return ok;
     }
 
-    private boolean submitSell(Opportunity o, int inventoryAmount)
+    private boolean submitSell(Opportunity opportunity, int inventoryAmount)
     {
-        holdingsSince.putIfAbsent(o.itemId, Instant.now());
-        boolean timedOut = Duration.between(holdingsSince.get(o.itemId), Instant.now()).getSeconds() >= Math.max(30, config.holdingTimeoutSeconds());
-        int sellPrice = timedOut ? o.panicSellPrice : o.normalSellPrice;
-        int qty = Math.min(inventoryAmount, o.targetQuantity);
-        if (qty <= 0)
+        holdingsSince.putIfAbsent(opportunity.itemId, Instant.now());
+        boolean timedOut = Duration.between(holdingsSince.get(opportunity.itemId), Instant.now()).getSeconds() >= Math.max(30, config.holdingTimeoutSeconds());
+        int sellPrice = timedOut ? opportunity.panicSellPrice : opportunity.normalSellPrice;
+        int quantity = Math.min(inventoryAmount, opportunity.targetQuantity);
+        if (quantity <= 0)
         {
             return false;
         }
 
-        Position p = positions.computeIfAbsent(o.itemId, k -> new Position());
-        p.lastSellPrice = sellPrice;
+        Position position = positions.computeIfAbsent(opportunity.itemId, k -> new Position());
+        position.lastSellPrice = sellPrice;
         ClientScriptAPI.closeNumericInputDialogue();
-        boolean ok = GrandExchangeAPI.startSellOffer(o.itemId, qty, sellPrice) != null;
+        boolean ok = GrandExchangeAPI.startSellOffer(opportunity.itemId, quantity, sellPrice) != null;
         ClientScriptAPI.closeNumericInputDialogue();
         return ok;
     }
@@ -455,6 +495,7 @@ public class MarketMentorPlugin extends VitaPlugin
                 continue;
             }
 
+            trackedItemIds.add(offer.getItemId());
             if (!isActiveState(offer.getState()))
             {
                 activeOfferSince.remove(offer.getItemId());
@@ -473,6 +514,15 @@ public class MarketMentorPlugin extends VitaPlugin
         }
     }
 
+    private void trackTopItems(List<Opportunity> opportunities)
+    {
+        int keepTop = Math.max(10, config.maxItemsPerCycle() * 10);
+        for (int i = 0; i < Math.min(keepTop, opportunities.size()); i++)
+        {
+            trackedItemIds.add(opportunities.get(i).itemId);
+        }
+    }
+
     private void openGrandExchange()
     {
         NpcEx clerk = new NpcQuery().withNameContains("Grand Exchange Clerk").sortNearest().first();
@@ -482,32 +532,35 @@ public class MarketMentorPlugin extends VitaPlugin
         }
     }
 
-    private void updatePnlTracking(Set<Integer> candidates)
+    private void updatePnlTracking()
     {
-        for (int itemId : candidates)
+        Set<Integer> keys = new HashSet<>(trackedItemIds);
+        keys.addAll(lastInventory.keySet());
+
+        for (int itemId : keys)
         {
             int current = inventoryAmount(itemId);
             int previous = lastInventory.getOrDefault(itemId, current);
             int delta = current - previous;
 
-            Position p = positions.computeIfAbsent(itemId, k -> new Position());
+            Position position = positions.computeIfAbsent(itemId, k -> new Position());
             if (delta > 0)
             {
-                int price = Math.max(1, p.lastBuyPrice);
-                p.quantity += delta;
-                p.totalCost += (long) delta * price;
+                int price = Math.max(1, position.lastBuyPrice);
+                position.quantity += delta;
+                position.totalCost += (long) delta * price;
                 holdingsSince.putIfAbsent(itemId, Instant.now());
             }
             else if (delta < 0)
             {
                 int sold = -delta;
-                int avgCost = p.quantity > 0 ? (int) Math.max(1L, p.totalCost / p.quantity) : Math.max(1, p.lastBuyPrice);
-                int sellPrice = Math.max(1, p.lastSellPrice);
+                int avgCost = position.quantity > 0 ? (int) Math.max(1L, position.totalCost / position.quantity) : Math.max(1, position.lastBuyPrice);
+                int sellPrice = Math.max(1, position.lastSellPrice);
                 gpMade += (long) sold * (sellPrice - avgCost);
 
-                p.quantity = Math.max(0, p.quantity - sold);
-                p.totalCost = Math.max(0L, p.totalCost - (long) sold * avgCost);
-                if (p.quantity == 0)
+                position.quantity = Math.max(0, position.quantity - sold);
+                position.totalCost = Math.max(0L, position.totalCost - (long) sold * avgCost);
+                if (position.quantity == 0)
                 {
                     holdingsSince.remove(itemId);
                 }
@@ -515,27 +568,6 @@ public class MarketMentorPlugin extends VitaPlugin
 
             lastInventory.put(itemId, current);
         }
-    }
-
-    private Set<Integer> parseItemIds(String csv)
-    {
-        Set<Integer> ids = new HashSet<>();
-        if (csv == null || csv.trim().isEmpty())
-        {
-            return ids;
-        }
-
-        for (String token : csv.split(","))
-        {
-            try
-            {
-                ids.add(Integer.parseInt(token.trim()));
-            }
-            catch (Exception ignored)
-            {
-            }
-        }
-        return ids;
     }
 
     private boolean isMembersOnlyItemOnFreeWorld(int itemId)

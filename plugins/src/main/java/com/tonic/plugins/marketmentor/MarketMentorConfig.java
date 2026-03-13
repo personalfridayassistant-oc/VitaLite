@@ -10,8 +10,8 @@ public interface MarketMentorConfig extends Config
     @ConfigItem(keyName = "enabled", name = "Enable automation", description = "Master toggle for fully automated GE trading", position = 0)
     default boolean enabled() { return false; }
 
-    @ConfigItem(keyName = "candidateItemIds", name = "Candidate item IDs", description = "CSV item ids to evaluate against Wiki prices", position = 1)
-    default String candidateItemIds() { return "11212,1516,2364,314,454"; }
+    @ConfigItem(keyName = "maxUniverseItems", name = "Auto-scan item universe", description = "Maximum top-volume items auto-selected from Wiki 5m data", position = 1)
+    default int maxUniverseItems() { return 1400; }
 
     @ConfigItem(keyName = "maxItemsPerCycle", name = "Max items per cycle", description = "Diversify by splitting buy attempts across top opportunities", position = 2)
     default int maxItemsPerCycle() { return 3; }
