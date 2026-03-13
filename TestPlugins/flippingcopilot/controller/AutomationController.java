@@ -2,6 +2,7 @@ package com.flippingcopilot.controller;
 
 import com.flippingcopilot.model.Suggestion;
 import com.flippingcopilot.model.SuggestionManager;
+import com.tonic.api.TClient;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
@@ -64,7 +65,19 @@ public class AutomationController {
             option = "Modify offer";
         }
 
-        client.invokeMenuAction(option, "", 1, MenuAction.CC_OP.getId(), -1, widget.getId());
+        if (client instanceof TClient) {
+            ((TClient) client).invokeMenuAction(
+                    option,
+                    "",
+                    1,
+                    MenuAction.CC_OP.getId(),
+                    -1,
+                    widget.getId(),
+                    -1,
+                    -1,
+                    -1
+            );
+        }
         lastActionAt = System.currentTimeMillis();
         log.debug("automation action {} on widget {}", option, widget.getId());
     }
