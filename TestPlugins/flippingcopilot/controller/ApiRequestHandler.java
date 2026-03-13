@@ -37,6 +37,9 @@ public class ApiRequestHandler {
     public static final String DEFAULT_COPILOT_PRICE_ERROR_MESSAGE = "Unable to fetch price copilot price (possible server update)";
     public static final String DEFAULT_PREMIUM_INSTANCE_ERROR_MESSAGE = "Error loading premium instance data (possible server update)";
     public static final String UNKNOWN_ERROR = "Unknown error";
+    public static final String OSRS_WIKI_5M_URL = "https://prices.runescape.wiki/api/v1/osrs/5m";
+    public static final String OSRS_WIKI_MAPPING_URL = "https://prices.runescape.wiki/api/v1/osrs/mapping";
+    private static final String WIKI_USER_AGENT = "VitaLite-FlippingCopilot";
     public static final int UNAUTHORIZED_CODE = 401;
     // dependencies
     private final OkHttpClient client;
@@ -44,6 +47,7 @@ public class ApiRequestHandler {
     private final CopilotLoginRS copilotLoginRS;
     private final SuggestionPreferencesManager preferencesManager;
     private final ClientThread clientThread;
+    private volatile Map<Integer, String> wikiItemNames = new HashMap<>();
 
 
     public void authenticate(String username, String password, Consumer<LoginResponse> successCallback, Consumer<String> failureCallback) {
@@ -140,6 +144,15 @@ public class ApiRequestHandler {
                                    Consumer<Data> graphDataConsumer,
                                    Consumer<HttpResponseException>  onFailure,
                                    boolean skipGraphData) {
+        Suggestion wikiSuggestion = getSuggestionFromWiki(status);
+        if (wikiSuggestion != null) {
+            clientThread.invoke(() -> suggestionConsumer.accept(wikiSuggestion));
+            Data d = new Data();
+            d.loadingErrorMessage = "No graph data loaded for this item.";
+            clientThread.invoke(() -> graphDataConsumer.accept(d));
+            return;
+        }
+
         log.debug("sending status {}", status.toString());
         String jwtToken = copilotLoginRS.get().getJwtToken();
         Request.Builder rb = new Request.Builder()
@@ -179,6 +192,170 @@ public class ApiRequestHandler {
                 }
             }
         });
+    }
+
+    private Suggestion getSuggestionFromWiki(JsonObject status) {
+        try {
+            JsonArray requested = status.has("requested_suggestion_types") ? status.getAsJsonArray("requested_suggestion_types") : new JsonArray();
+            boolean buyRequested = false;
+            for (JsonElement el : requested) {
+                if ("buy".equals(el.getAsString())) {
+                    buyRequested = true;
+                    break;
+                }
+            }
+            if (!buyRequested) {
+                return waitSuggestion("No buy action needed right now.");
+            }
+
+            long gp = 0;
+            if (status.has("items")) {
+                for (JsonElement item : status.getAsJsonArray("items")) {
+                    JsonObject obj = item.getAsJsonObject();
+                    if (obj.has("item_id") && obj.get("item_id").getAsInt() == 995) {
+                        gp = obj.get("amount").getAsLong();
+                        break;
+                    }
+                }
+            }
+            if (gp < 1000) {
+                return waitSuggestion("Not enough coins available to place a buy offer.");
+            }
+
+            Set<Integer> blockedItems = new HashSet<>();
+            if (status.has("blocked_items")) {
+                for (JsonElement blocked : status.getAsJsonArray("blocked_items")) {
+                    blockedItems.add(blocked.getAsInt());
+                }
+            }
+
+            JsonObject data = fetchWiki5mData();
+            if (data == null || data.size() == 0) {
+                return waitSuggestion("No market data available from OSRS Wiki right now.");
+            }
+
+            Map<Integer, String> names = loadWikiItemNames();
+            int bestItemId = -1;
+            int bestBuyPrice = 0;
+            int bestSellPrice = 0;
+            int bestQty = 0;
+            double bestProfit = 0;
+
+            for (Map.Entry<String, JsonElement> entry : data.entrySet()) {
+                int itemId;
+                try {
+                    itemId = Integer.parseInt(entry.getKey());
+                } catch (NumberFormatException e) {
+                    continue;
+                }
+                if (blockedItems.contains(itemId) || itemId == 995) {
+                    continue;
+                }
+                JsonObject price = entry.getValue().getAsJsonObject();
+                int low = readInt(price, "avgLowPrice");
+                int high = readInt(price, "avgHighPrice");
+                int lowVol = readInt(price, "lowPriceVolume");
+                int highVol = readInt(price, "highPriceVolume");
+                if (low <= 0 || high <= low || lowVol < 20 || highVol < 20) {
+                    continue;
+                }
+                int qty = (int) Math.min(500, gp / low);
+                if (qty <= 0) {
+                    continue;
+                }
+                double profit = (double) (high - low) * qty;
+                if (profit > bestProfit) {
+                    bestProfit = profit;
+                    bestItemId = itemId;
+                    bestBuyPrice = low;
+                    bestSellPrice = high;
+                    bestQty = qty;
+                }
+            }
+
+            if (bestItemId == -1) {
+                return waitSuggestion("No suitable flips from OSRS Wiki 5m data.");
+            }
+
+            Suggestion suggestion = new Suggestion();
+            suggestion.setType("buy");
+            suggestion.setBoxId(0);
+            suggestion.setItemId(bestItemId);
+            suggestion.setPrice(bestBuyPrice);
+            suggestion.setQuantity(bestQty);
+            suggestion.setName(names.getOrDefault(bestItemId, "Item " + bestItemId));
+            suggestion.setExpectedProfit(bestProfit);
+            suggestion.setMessage("Buy " + suggestion.getName() + " @ " + bestBuyPrice + " (Wiki 5m)");
+            return suggestion;
+        } catch (Exception e) {
+            log.warn("wiki suggestion generation failed", e);
+            return null;
+        }
+    }
+
+    private Suggestion waitSuggestion(String message) {
+        Suggestion s = new Suggestion();
+        s.setType("wait");
+        s.setBoxId(0);
+        s.setItemId(0);
+        s.setPrice(0);
+        s.setQuantity(0);
+        s.setName("Waiting");
+        s.setMessage(message);
+        return s;
+    }
+
+    private int readInt(JsonObject obj, String key) {
+        return obj.has(key) && !obj.get(key).isJsonNull() ? obj.get(key).getAsInt() : 0;
+    }
+
+    private JsonObject fetchWiki5mData() throws IOException {
+        Request request = new Request.Builder()
+                .url(OSRS_WIKI_5M_URL)
+                .addHeader("User-Agent", WIKI_USER_AGENT)
+                .addHeader("Accept", "application/json")
+                .get()
+                .build();
+        try (Response response = client.newCall(request).execute()) {
+            if (!response.isSuccessful() || response.body() == null) {
+                return null;
+            }
+            JsonObject body = gson.fromJson(response.body().string(), JsonObject.class);
+            return body != null && body.has("data") ? body.getAsJsonObject("data") : null;
+        }
+    }
+
+    private Map<Integer, String> loadWikiItemNames() {
+        if (!wikiItemNames.isEmpty()) {
+            return wikiItemNames;
+        }
+        synchronized (this) {
+            if (!wikiItemNames.isEmpty()) {
+                return wikiItemNames;
+            }
+            Map<Integer, String> names = new HashMap<>();
+            Request request = new Request.Builder()
+                    .url(OSRS_WIKI_MAPPING_URL)
+                    .addHeader("User-Agent", WIKI_USER_AGENT)
+                    .addHeader("Accept", "application/json")
+                    .get()
+                    .build();
+            try (Response response = client.newCall(request).execute()) {
+                if (response.isSuccessful() && response.body() != null) {
+                    JsonArray arr = gson.fromJson(response.body().string(), JsonArray.class);
+                    for (JsonElement e : arr) {
+                        JsonObject o = e.getAsJsonObject();
+                        if (o.has("id") && o.has("name")) {
+                            names.put(o.get("id").getAsInt(), o.get("name").getAsString());
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                log.debug("could not load wiki mapping", e);
+            }
+            wikiItemNames = names;
+            return wikiItemNames;
+        }
     }
 
     private void handleSuggestionResponse(Response response, Consumer<Suggestion> suggestionConsumer, Consumer<Data> graphDataConsumer) throws IOException {
@@ -311,18 +488,37 @@ public class ApiRequestHandler {
     }
 
     private String extractErrorMessage(Response response) {
-        if (response.body() != null) {
-            try {
-                String bodyStr = response.body().string();
-                JsonObject errorJson = gson.fromJson(bodyStr, JsonObject.class);
-                if (errorJson.has("message")) {
+        if (response.body() == null) {
+            return UNKNOWN_ERROR;
+        }
+        try {
+            String bodyStr = response.body().string();
+            if (bodyStr == null || bodyStr.isBlank()) {
+                return UNKNOWN_ERROR;
+            }
+            JsonElement parsed = JsonParser.parseString(bodyStr);
+            if (parsed.isJsonObject()) {
+                JsonObject errorJson = parsed.getAsJsonObject();
+                if (errorJson.has("message") && !errorJson.get("message").isJsonNull()) {
                     return errorJson.get("message").getAsString();
                 }
-            } catch (Exception e) {
-                log.warn("failed reading/parsing error message from http {} response body", response.code(), e);
+                if (errorJson.has("error") && !errorJson.get("error").isJsonNull()) {
+                    return errorJson.get("error").getAsString();
+                }
+                return bodyStr;
             }
+            if (parsed.isJsonPrimitive()) {
+                return parsed.getAsString();
+            }
+            return bodyStr;
+        } catch (Exception e) {
+            log.warn("failed reading/parsing error message from http {} response body", response.code(), e);
+            return UNKNOWN_ERROR;
         }
-        return UNKNOWN_ERROR;
+    }
+
+    private boolean isOfflineToken(String jwtToken) {
+        return jwtToken == null || jwtToken.isBlank() || "offline".equals(jwtToken);
     }
 
 
@@ -373,21 +569,12 @@ public class ApiRequestHandler {
     }
 
     public void asyncGetItemPriceWithGraphData(int itemId, String displayName, Consumer<ItemPrice> consumer, boolean includeGraphData) {
-        JsonObject body = new JsonObject();
-        body.add("item_id", new JsonPrimitive(itemId));
-        body.add("display_name", new JsonPrimitive(displayName));
-        body.addProperty("f2p_only", preferencesManager.isF2pOnlyMode());
-        body.addProperty("timeframe_minutes", preferencesManager.getTimeframe());
-        body.addProperty("risk_level", preferencesManager.getRiskLevel().toApiValue());
-        body.addProperty("include_graph_data", includeGraphData);
-        log.debug("requesting price graph data for item {}", itemId);
-        String jwtToken = copilotLoginRS.get().getJwtToken();
+        log.debug("requesting item price from wiki 5m for item {}", itemId);
         Request request = new Request.Builder()
-                .url(serverUrl +"/prices")
-                .addHeader("Authorization", "Bearer " + jwtToken)
-                .addHeader("Accept", "application/x-msgpack")
-                .addHeader("X-VERSION", "1")
-                .post(RequestBody.create(MediaType.get("application/json; charset=utf-8"), body.toString()))
+                .url(OSRS_WIKI_5M_URL)
+                .addHeader("User-Agent", WIKI_USER_AGENT)
+                .addHeader("Accept", "application/json")
+                .get()
                 .build();
 
         client.newBuilder()
@@ -404,17 +591,19 @@ public class ApiRequestHandler {
             @Override
             public void onResponse(Call call, Response response) {
                 try {
-                    if (!response.isSuccessful()) {
-                        if(response.code() == UNAUTHORIZED_CODE && Objects.equals(jwtToken, copilotLoginRS.get().getJwtToken())) {
-                            copilotLoginRS.clear();
-                        }
-                        log.error("get copilot price for item {} failed with http status code {}", itemId, response.code());
+                    if (!response.isSuccessful() || response.body() == null) {
+                        log.error("get wiki price for item {} failed with http status code {}", itemId, response.code());
                         ItemPrice ip = new ItemPrice(0, 0, DEFAULT_COPILOT_PRICE_ERROR_MESSAGE, null);
                         clientThread.invoke(() -> consumer.accept(ip));
                     } else {
-                        byte[] d = response.body().bytes();
-                        ItemPrice ip = ItemPrice.fromMsgPack(ByteBuffer.wrap(d));
-                        log.debug("price graph data received for item {}", itemId);
+                        JsonObject body = gson.fromJson(response.body().string(), JsonObject.class);
+                        JsonObject data = body == null ? null : body.getAsJsonObject("data");
+                        JsonObject item = data == null ? null : data.getAsJsonObject(String.valueOf(itemId));
+                        int buyPrice = item == null ? 0 : readInt(item, "avgLowPrice");
+                        int sellPrice = item == null ? 0 : readInt(item, "avgHighPrice");
+                        String message = buyPrice > 0 && sellPrice > 0 ? null : DEFAULT_COPILOT_PRICE_ERROR_MESSAGE;
+                        ItemPrice ip = new ItemPrice(sellPrice, buyPrice, message, null);
+                        log.debug("wiki 5m price data received for item {}", itemId);
                         clientThread.invoke(() -> consumer.accept(ip));
                     }
                 } catch (Exception e) {
@@ -581,6 +770,10 @@ public class ApiRequestHandler {
 
     public void asyncLoadAccounts(Consumer<Map<String, Integer>> onSuccess, Consumer<String> onFailure) {
         String jwtToken = copilotLoginRS.get().getJwtToken();
+        if (isOfflineToken(jwtToken)) {
+            onSuccess.accept(new HashMap<>());
+            return;
+        }
         Request request = new Request.Builder()
                 .url(serverUrl + "/profit-tracking/rs-account-names")
                 .addHeader("Authorization", "Bearer " + jwtToken)
@@ -600,6 +793,11 @@ public class ApiRequestHandler {
                     if (!response.isSuccessful()) {
                         if(response.code() == UNAUTHORIZED_CODE && Objects.equals(jwtToken, copilotLoginRS.get().getJwtToken())) {
                             copilotLoginRS.clear();
+                        }
+                        if (response.code() == 403) {
+                            log.info("load user display names forbidden with current token, continuing in offline mode");
+                            onSuccess.accept(new HashMap<>());
+                            return;
                         }
                         String errorMessage = extractErrorMessage(response);
                         log.error("load user display names failed with http status code {}, error message {}", response.code(), errorMessage);

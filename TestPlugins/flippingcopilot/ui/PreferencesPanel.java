@@ -2,7 +2,6 @@ package com.flippingcopilot.ui;
 
 import com.flippingcopilot.controller.DumpsStreamController;
 import com.flippingcopilot.controller.ItemController;
-import com.flippingcopilot.controller.PremiumInstanceController;
 import com.flippingcopilot.model.OsrsLoginManager;
 import com.flippingcopilot.model.SuggestionPreferencesManager;
 import com.flippingcopilot.model.SuggestionManager;
@@ -79,7 +78,6 @@ public class PreferencesPanel extends JPanel {
     public PreferencesPanel(
             SuggestionManager suggestionManager,
             SuggestionPreferencesManager preferencesManager,
-            PremiumInstanceController premiumInstanceController,
             ItemController itemController,
             OsrsLoginManager osrsLoginManager,
             DumpsStreamController dumpsStreamController) {
@@ -118,7 +116,7 @@ public class PreferencesPanel extends JPanel {
 
         loginPromptPanel = new JPanel(new GridBagLayout());
         loginPromptPanel.setBackground(ColorScheme.DARKER_GRAY_COLOR);
-        JLabel loginPrompt = new JLabel("<html><center>Log in to the game<br>to alter suggestion settings.</center></html>");
+        JLabel loginPrompt = new JLabel("<html><center>Open the Grand Exchange<br>to alter suggestion settings.</center></html>");
         loginPrompt.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
         loginPromptPanel.add(loginPrompt);
 
@@ -317,19 +315,6 @@ public class PreferencesPanel extends JPanel {
         preferencesContent.add(reservedSlotsPanel);
         preferencesContent.add(Box.createRigidArea(new Dimension(0, 6)));
 
-        // Premium instances panel - moved to the bottom
-        JPanel premiumInstancesPanel = new JPanel();
-        premiumInstancesPanel.setLayout(new BorderLayout());
-        premiumInstancesPanel.setOpaque(false);
-        JLabel premiumInstancesLabel = new JLabel("Premium accounts:");
-        JButton manageButton = new JButton("manage");
-        manageButton.addActionListener(e -> {
-            premiumInstanceController.loadAndOpenPremiumInstanceDialog();
-        });
-        premiumInstancesPanel.add(premiumInstancesLabel, BorderLayout.LINE_START);
-        premiumInstancesPanel.add(manageButton, BorderLayout.LINE_END);
-        preferencesContent.add(premiumInstancesPanel);
-        preferencesContent.add(Box.createRigidArea(new Dimension(0, 3)));
     }
 
 
