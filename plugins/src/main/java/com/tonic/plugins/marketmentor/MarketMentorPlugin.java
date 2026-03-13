@@ -43,6 +43,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -143,6 +144,19 @@ public class MarketMentorPlugin extends VitaPlugin
         private long totalCost;
         private int lastBuyPrice;
         private int lastSellPrice;
+        private final LinkedList<BuyLot> buyLots = new LinkedList<>();
+    }
+
+    private static final class BuyLot
+    {
+        private int quantity;
+        private final int unitPrice;
+
+        private BuyLot(int quantity, int unitPrice)
+        {
+            this.quantity = quantity;
+            this.unitPrice = unitPrice;
+        }
     }
 
     @Inject private MarketMentorConfig config;
@@ -162,6 +176,8 @@ public class MarketMentorPlugin extends VitaPlugin
     private final List<PanelOffer> panelOffers = new ArrayList<>();
     private final Map<Integer, Boolean> wikiMembershipMap = new HashMap<>();
     private final Map<Integer, Integer> wikiGeLimitMap = new HashMap<>();
+    private final Map<Integer, Integer> pendingBuyPrice = new HashMap<>();
+    private final Map<Integer, Integer> pendingSellPrice = new HashMap<>();
 
     private Instant lastMappingRefresh = Instant.EPOCH;
     private Instant startTime;
@@ -225,7 +241,7 @@ public class MarketMentorPlugin extends VitaPlugin
         updatePnlTracking();
         updateSlotText();
         coinsText = String.format("%,d", inventoryAmount(ItemID.COINS));
-        ClientScriptAPI.closeNumericInputDialogue();
+        clearNumericDialogueFailsafe();
 
         if (!GrandExchangeAPI.isOpen())
         {
@@ -240,12 +256,7 @@ public class MarketMentorPlugin extends VitaPlugin
             return;
         }
 
-        if (GrandExchangeAPI.canCollect())
-        {
-            GrandExchangeAPI.collectAll();
-            humanPause();
-        }
-
+        collectFast();
         pruneAndCancelStaleOffers();
 
         List<MarketSnapshot> snapshots = fetchSnapshots();
@@ -269,6 +280,13 @@ public class MarketMentorPlugin extends VitaPlugin
 
         opportunities.sort(Comparator.comparingDouble((Opportunity o) -> o.score).reversed());
         updatePanelOffers(opportunities);
+        Map<Integer, Opportunity> opportunityById = new HashMap<>();
+        for (Opportunity o : opportunities)
+        {
+            opportunityById.put(o.itemId, o);
+        }
+
+        collectFast();
 
         if (opportunities.isEmpty())
         {
@@ -287,8 +305,8 @@ public class MarketMentorPlugin extends VitaPlugin
         }
 
         trackTopItems(opportunities);
-
-        int actions = executeTrades(opportunities);
+        int actions = forceExitBadDeals(opportunityById);
+        actions += executeTrades(opportunities);
         if (actions == 0)
         {
             statusText = "No actionable trade";
@@ -306,7 +324,7 @@ public class MarketMentorPlugin extends VitaPlugin
         }
 
         refreshPanel();
-        ClientScriptAPI.closeNumericInputDialogue();
+        clearNumericDialogueFailsafe();
         Delays.tick(Math.max(1, config.loopDelayTicks()));
     }
 
@@ -321,6 +339,8 @@ public class MarketMentorPlugin extends VitaPlugin
         }
 
         int actions = 0;
+
+        // SELL PRIORITY #1: sell any held inventory first, even from partial/completed buys.
         for (Opportunity opportunity : opportunities)
         {
             if (freeSlots <= 0)
@@ -345,7 +365,38 @@ public class MarketMentorPlugin extends VitaPlugin
                 lastTradedItemId = opportunity.itemId;
                 activeOfferSince.put(opportunity.itemId, Instant.now());
                 statusText = "Selling " + itemName(opportunity.itemId);
+                collectFast();
                 humanPause();
+            }
+        }
+
+        // Backstop: if still free slots, sell any remaining tracked inventory with fallback prices.
+        if (freeSlots > 0)
+        {
+            for (int itemId : new HashSet<>(trackedItemIds))
+            {
+                if (freeSlots <= 0 || hasActiveOffer(itemId))
+                {
+                    continue;
+                }
+
+                int invAmount = inventoryAmount(itemId);
+                if (invAmount <= 0)
+                {
+                    continue;
+                }
+
+                Opportunity fallback = new Opportunity(itemId, Math.max(1, pendingBuyPrice.getOrDefault(itemId, 1)), Math.max(1, pendingSellPrice.getOrDefault(itemId, pendingBuyPrice.getOrDefault(itemId, 1))), Math.max(1, pendingBuyPrice.getOrDefault(itemId, 1)), invAmount, 1, Math.max(1, invAmount), 0.0, 0.0);
+                if (submitSell(fallback, invAmount))
+                {
+                    actions++;
+                    freeSlots--;
+                    lastTradedItemId = itemId;
+                    activeOfferSince.put(itemId, Instant.now());
+                    statusText = "Selling held " + itemName(itemId);
+                    collectFast();
+                    humanPause();
+                }
             }
         }
 
@@ -362,12 +413,7 @@ public class MarketMentorPlugin extends VitaPlugin
             {
                 continue;
             }
-
             buyList.add(opportunity);
-            if (buyList.size() >= Math.max(1, config.maxItemsPerCycle()))
-            {
-                break;
-            }
         }
 
         int buyTargets = Math.min(freeSlots, buyList.size());
@@ -398,11 +444,69 @@ public class MarketMentorPlugin extends VitaPlugin
                 coins = Math.max(0, coins - (qty * opportunity.buyPrice));
                 activeOfferSince.put(opportunity.itemId, Instant.now());
                 statusText = "Buying " + itemName(opportunity.itemId);
+                collectFast();
                 humanPause();
             }
         }
 
         return actions;
+    }
+
+    private int forceExitBadDeals(Map<Integer, Opportunity> opportunityById)
+    {
+        int actions = 0;
+        for (int itemId : new HashSet<>(trackedItemIds))
+        {
+            if (hasActiveOffer(itemId))
+            {
+                continue;
+            }
+
+            int invAmount = inventoryAmount(itemId);
+            if (invAmount <= 0)
+            {
+                continue;
+            }
+
+            Position p = positions.computeIfAbsent(itemId, k -> new Position());
+            int avgCost = p.quantity > 0 ? (int) Math.max(1L, p.totalCost / Math.max(1, p.quantity)) : Math.max(1, p.lastBuyPrice);
+            Opportunity o = opportunityById.get(itemId);
+            boolean badDeal = o == null || o.normalSellPrice <= avgCost || o.netRoi < 0;
+            if (!badDeal)
+            {
+                continue;
+            }
+
+            int sellPrice = o != null ? Math.max(1, o.panicSellPrice) : Math.max(1, avgCost - 1);
+            Opportunity exit = new Opportunity(itemId, avgCost, sellPrice, sellPrice, invAmount, 1, invAmount, 0, 0);
+            if (submitSell(exit, invAmount))
+            {
+                actions++;
+                statusText = "Exiting bad deal " + itemName(itemId);
+                activeOfferSince.put(itemId, Instant.now());
+                lastTradedItemId = itemId;
+            }
+        }
+        return actions;
+    }
+
+    private void collectFast()
+    {
+        for (int i = 0; i < 4 && GrandExchangeAPI.canCollect(); i++)
+        {
+            GrandExchangeAPI.collectAll();
+            clearNumericDialogueFailsafe();
+            Delays.wait(35);
+        }
+    }
+
+    private void clearNumericDialogueFailsafe()
+    {
+        for (int i = 0; i < 3; i++)
+        {
+            ClientScriptAPI.closeNumericInputDialogue();
+            Delays.wait(15);
+        }
     }
 
     private List<Opportunity> buildOpportunities(List<MarketSnapshot> snapshots, boolean relaxed)
@@ -612,9 +716,10 @@ public class MarketMentorPlugin extends VitaPlugin
     {
         Position position = positions.computeIfAbsent(opportunity.itemId, k -> new Position());
         position.lastBuyPrice = opportunity.buyPrice;
-        ClientScriptAPI.closeNumericInputDialogue();
+        pendingBuyPrice.put(opportunity.itemId, opportunity.buyPrice);
+        clearNumericDialogueFailsafe();
         boolean ok = GrandExchangeAPI.startBuyOffer(opportunity.itemId, quantity, opportunity.buyPrice) != null;
-        ClientScriptAPI.closeNumericInputDialogue();
+        clearNumericDialogueFailsafe();
         return ok;
     }
 
@@ -623,6 +728,7 @@ public class MarketMentorPlugin extends VitaPlugin
         holdingsSince.putIfAbsent(opportunity.itemId, Instant.now());
         boolean timedOut = Duration.between(holdingsSince.get(opportunity.itemId), Instant.now()).getSeconds() >= Math.max(30, config.holdingTimeoutSeconds());
         int sellPrice = timedOut ? opportunity.panicSellPrice : opportunity.normalSellPrice;
+        pendingSellPrice.put(opportunity.itemId, sellPrice);
         int quantity = Math.min(inventoryAmount, opportunity.targetQuantity);
         if (quantity <= 0)
         {
@@ -631,9 +737,9 @@ public class MarketMentorPlugin extends VitaPlugin
 
         Position position = positions.computeIfAbsent(opportunity.itemId, k -> new Position());
         position.lastSellPrice = sellPrice;
-        ClientScriptAPI.closeNumericInputDialogue();
+        clearNumericDialogueFailsafe();
         boolean ok = GrandExchangeAPI.startSellOffer(opportunity.itemId, quantity, sellPrice) != null;
-        ClientScriptAPI.closeNumericInputDialogue();
+        clearNumericDialogueFailsafe();
         return ok;
     }
 
@@ -661,7 +767,7 @@ public class MarketMentorPlugin extends VitaPlugin
             if (start != null && Duration.between(start, now).getSeconds() >= timeoutSeconds)
             {
                 GrandExchangeAPI.abortOffer(offer.getItemId());
-                ClientScriptAPI.closeNumericInputDialogue();
+                clearNumericDialogueFailsafe();
                 humanPause();
                 activeOfferSince.put(offer.getItemId(), now);
             }
@@ -731,21 +837,53 @@ public class MarketMentorPlugin extends VitaPlugin
             Position position = positions.computeIfAbsent(itemId, k -> new Position());
             if (delta > 0)
             {
-                int price = Math.max(1, position.lastBuyPrice);
+                int price = Math.max(1, pendingBuyPrice.getOrDefault(itemId, position.lastBuyPrice));
+                position.lastBuyPrice = price;
                 position.quantity += delta;
                 position.totalCost += (long) delta * price;
+                position.buyLots.add(new BuyLot(delta, price));
                 holdingsSince.putIfAbsent(itemId, Instant.now());
             }
             else if (delta < 0)
             {
                 int sold = -delta;
-                int avgCost = position.quantity > 0 ? (int) Math.max(1L, position.totalCost / position.quantity) : Math.max(1, position.lastBuyPrice);
-                int sellPrice = Math.max(1, position.lastSellPrice);
-                gpMade += (long) sold * (sellPrice - avgCost);
+                int sellPrice = Math.max(1, pendingSellPrice.getOrDefault(itemId, position.lastSellPrice));
+                position.lastSellPrice = sellPrice;
+
+                int remaining = sold;
+                long realized = 0;
+                while (remaining > 0 && !position.buyLots.isEmpty())
+                {
+                    BuyLot lot = position.buyLots.peekFirst();
+                    int use = Math.min(remaining, lot.quantity);
+                    realized += (long) use * (sellPrice - lot.unitPrice);
+                    lot.quantity -= use;
+                    remaining -= use;
+                    if (lot.quantity <= 0)
+                    {
+                        position.buyLots.removeFirst();
+                    }
+                }
+
+                if (remaining > 0)
+                {
+                    int fallbackCost = position.quantity > 0 ? (int) Math.max(1L, position.totalCost / Math.max(1, position.quantity)) : Math.max(1, position.lastBuyPrice);
+                    realized += (long) remaining * (sellPrice - fallbackCost);
+                }
+
+                gpMade += realized;
                 itemsFlipped += sold;
 
                 position.quantity = Math.max(0, position.quantity - sold);
-                position.totalCost = Math.max(0L, position.totalCost - (long) sold * avgCost);
+                long recomputedCost = 0;
+                int recomputedQty = 0;
+                for (BuyLot lot : position.buyLots)
+                {
+                    recomputedQty += lot.quantity;
+                    recomputedCost += (long) lot.quantity * lot.unitPrice;
+                }
+                position.quantity = recomputedQty;
+                position.totalCost = recomputedCost;
                 if (position.quantity == 0)
                 {
                     holdingsSince.remove(itemId);
@@ -876,11 +1014,11 @@ public class MarketMentorPlugin extends VitaPlugin
         try
         {
             String name = client.getItemDefinition(itemId).getName();
-            return name == null ? String.valueOf(itemId) : name;
+            return name == null || name.trim().isEmpty() ? "Unknown item" : name;
         }
         catch (Exception ex)
         {
-            return String.valueOf(itemId);
+            return "Unknown item";
         }
     }
 
