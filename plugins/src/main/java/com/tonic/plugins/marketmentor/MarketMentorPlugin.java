@@ -1,5 +1,6 @@
 package com.tonic.plugins.marketmentor;
 
+import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -55,6 +56,7 @@ public class MarketMentorPlugin extends VitaPlugin
 {
     private static final String WIKI_LATEST = "https://prices.runescape.wiki/api/v1/osrs/latest";
     private static final String WIKI_5M = "https://prices.runescape.wiki/api/v1/osrs/5m";
+    private static final String WIKI_MAPPING = "https://prices.runescape.wiki/api/v1/osrs/mapping";
     private static final double ESTIMATED_GE_TAX = 0.01;
 
     public static final class PanelOffer
@@ -142,18 +144,12 @@ public class MarketMentorPlugin extends VitaPlugin
         private int lastSellPrice;
     }
 
-    @Inject
-    private MarketMentorConfig config;
-    @Inject
-    private Client client;
-    @Inject
-    private OverlayManager overlayManager;
-    @Inject
-    private MarketMentorOverlay overlay;
-    @Inject
-    private MarketMentorPanel panel;
-    @Inject
-    private ClientToolbar clientToolbar;
+    @Inject private MarketMentorConfig config;
+    @Inject private Client client;
+    @Inject private OverlayManager overlayManager;
+    @Inject private MarketMentorOverlay overlay;
+    @Inject private MarketMentorPanel panel;
+    @Inject private ClientToolbar clientToolbar;
 
     private NavigationButton navigationButton;
 
@@ -163,10 +159,13 @@ public class MarketMentorPlugin extends VitaPlugin
     private final Map<Integer, Position> positions = new HashMap<>();
     private final Set<Integer> trackedItemIds = new HashSet<>();
     private final List<PanelOffer> panelOffers = new ArrayList<>();
+    private final Map<Integer, Boolean> wikiMembershipMap = new HashMap<>();
 
+    private Instant lastMappingRefresh = Instant.EPOCH;
     private Instant startTime;
     private long gpMade;
     private long itemsFlipped;
+    private int lastTradedItemId;
     private String statusText = "Idle";
     private String slotText = "0/0";
     private String coinsText = "0";
@@ -185,17 +184,14 @@ public class MarketMentorPlugin extends VitaPlugin
         startTime = Instant.now();
         gpMade = 0;
         itemsFlipped = 0;
+        lastTradedItemId = -1;
         statusText = "Starting";
         currentSuggestion = null;
         bestSuggestion = null;
         overlayManager.add(overlay);
 
         BufferedImage icon = ImageUtil.loadImageResource(getClass(), "/graph.png");
-        navigationButton = NavigationButton.builder()
-                .tooltip("Market Mentor")
-                .icon(icon)
-                .panel(panel)
-                .build();
+        navigationButton = NavigationButton.builder().tooltip("Market Mentor").icon(icon).panel(panel).build();
         clientToolbar.addNavigation(navigationButton);
     }
 
@@ -221,6 +217,7 @@ public class MarketMentorPlugin extends VitaPlugin
             return;
         }
 
+        refreshMappingIfStale();
         updatePnlTracking();
         updateSlotText();
         coinsText = String.format("%,d", inventoryAmount(ItemID.COINS));
@@ -247,7 +244,17 @@ public class MarketMentorPlugin extends VitaPlugin
 
         pruneAndCancelStaleOffers();
 
-        List<Opportunity> opportunities = buildOpportunities(fetchSnapshots());
+        List<MarketSnapshot> snapshots = fetchSnapshots();
+        List<Opportunity> opportunities = buildOpportunities(snapshots, false);
+        if (opportunities.isEmpty())
+        {
+            opportunities = buildOpportunities(snapshots, true); // failsafe relaxed strategy
+            if (!opportunities.isEmpty())
+            {
+                statusText = "Using relaxed failsafe strategy";
+            }
+        }
+
         opportunities.sort(Comparator.comparingDouble((Opportunity o) -> o.score).reversed());
         updatePanelOffers(opportunities);
 
@@ -272,6 +279,17 @@ public class MarketMentorPlugin extends VitaPlugin
         if (actions == 0)
         {
             statusText = "No actionable trade";
+            // extra failsafe: try top opportunity with minimal quantity if affordable
+            Opportunity o = opportunities.get(0);
+            if (!hasActiveOffer(o.itemId))
+            {
+                int coins = Math.max(0, inventoryAmount(ItemID.COINS) - Math.max(0, config.coinReserve()));
+                if (coins >= o.buyPrice && submitBuy(o, 1))
+                {
+                    lastTradedItemId = o.itemId;
+                    statusText = "Failsafe buy " + itemName(o.itemId);
+                }
+            }
         }
 
         refreshPanel();
@@ -311,6 +329,7 @@ public class MarketMentorPlugin extends VitaPlugin
             {
                 actions++;
                 freeSlots--;
+                lastTradedItemId = opportunity.itemId;
                 activeOfferSince.put(opportunity.itemId, Instant.now());
                 statusText = "Selling " + itemName(opportunity.itemId);
                 humanPause();
@@ -362,6 +381,7 @@ public class MarketMentorPlugin extends VitaPlugin
             {
                 actions++;
                 freeSlots--;
+                lastTradedItemId = opportunity.itemId;
                 coins = Math.max(0, coins - (qty * opportunity.buyPrice));
                 activeOfferSince.put(opportunity.itemId, Instant.now());
                 statusText = "Buying " + itemName(opportunity.itemId);
@@ -372,12 +392,22 @@ public class MarketMentorPlugin extends VitaPlugin
         return actions;
     }
 
-    private List<Opportunity> buildOpportunities(List<MarketSnapshot> snapshots)
+    private List<Opportunity> buildOpportunities(List<MarketSnapshot> snapshots, boolean relaxed)
     {
         List<Opportunity> opportunities = new ArrayList<>();
         int minVolume = Math.max(1, config.minFiveMinuteVolume());
         double minMargin = Math.max(0.1, config.minMarginPct()) / 100.0;
         double minNetRoi = Math.max(0.1, config.minNetRoiPct()) / 100.0;
+        int maxAgeSeconds = Math.max(60, config.maxDataAgeSeconds());
+
+        if (relaxed)
+        {
+            minVolume = Math.max(1, minVolume / 2);
+            minMargin *= 0.6;
+            minNetRoi *= 0.5;
+            maxAgeSeconds *= 2;
+        }
+
         long now = System.currentTimeMillis() / 1000L;
 
         for (MarketSnapshot snap : snapshots)
@@ -393,7 +423,7 @@ public class MarketMentorPlugin extends VitaPlugin
             }
 
             int freshest = Math.max(snap.highTime, snap.lowTime);
-            if ((now - freshest) > Math.max(60, config.maxDataAgeSeconds()))
+            if ((now - freshest) > maxAgeSeconds)
             {
                 continue;
             }
@@ -509,6 +539,36 @@ public class MarketMentorPlugin extends VitaPlugin
         return ids;
     }
 
+    private void refreshMappingIfStale()
+    {
+        if (Duration.between(lastMappingRefresh, Instant.now()).getSeconds() < 1800 && !wikiMembershipMap.isEmpty())
+        {
+            return;
+        }
+
+        try
+        {
+            JsonArray mappingArray = readJson(WIKI_MAPPING).getAsJsonArray();
+            wikiMembershipMap.clear();
+            for (JsonElement element : mappingArray)
+            {
+                JsonObject obj = element.getAsJsonObject();
+                int id = getInt(obj, "id", -1);
+                if (id <= 0)
+                {
+                    continue;
+                }
+                boolean members = obj.has("members") && !obj.get("members").isJsonNull() && obj.get("members").getAsBoolean();
+                wikiMembershipMap.put(id, members);
+            }
+            lastMappingRefresh = Instant.now();
+        }
+        catch (Exception ex)
+        {
+            Logger.warn("[MarketMentor] mapping fetch failed: " + ex.getMessage());
+        }
+    }
+
     private boolean submitBuy(Opportunity opportunity, int quantity)
     {
         Position position = positions.computeIfAbsent(opportunity.itemId, k -> new Position());
@@ -585,19 +645,13 @@ public class MarketMentorPlugin extends VitaPlugin
         for (int i = 0; i < top; i++)
         {
             Opportunity o = opportunities.get(i);
-            panelOffers.add(new PanelOffer(
-                    o.itemId,
-                    itemName(o.itemId),
-                    String.format("%.2f%%", o.netRoi * 100.0),
-                    String.format("%,d", o.volume),
-                    String.format("%,d", o.spread)
-            ));
+            panelOffers.add(new PanelOffer(o.itemId, itemName(o.itemId), String.format("%.2f%%", o.netRoi * 100.0), String.format("%,d", o.volume), String.format("%,d", o.spread)));
         }
     }
 
     private void refreshPanel()
     {
-        panel.refresh(statusText, getProfitText(), getAverageGpPerHourText(), (int) itemsFlipped, new ArrayList<>(panelOffers));
+        panel.refresh(statusText, getProfitText(), getAverageGpPerHourText(), (int) itemsFlipped, lastTradedItemId, itemName(lastTradedItemId), new ArrayList<>(panelOffers));
     }
 
     private void openGrandExchange()
@@ -652,13 +706,14 @@ public class MarketMentorPlugin extends VitaPlugin
     {
         try
         {
-            ItemComposition definition = client.getItemDefinition(itemId);
-            if (definition == null)
+            boolean membersItem = wikiMembershipMap.getOrDefault(itemId, false);
+            if (!WorldsAPI.inMembersWorld() && membersItem)
             {
                 return false;
             }
 
-            if (!definition.isTradeable())
+            ItemComposition definition = client.getItemDefinition(itemId);
+            if (definition == null || !definition.isTradeable())
             {
                 return false;
             }
@@ -747,6 +802,11 @@ public class MarketMentorPlugin extends VitaPlugin
 
     private String itemName(int itemId)
     {
+        if (itemId <= 0)
+        {
+            return "None";
+        }
+
         try
         {
             String name = client.getItemDefinition(itemId).getName();
