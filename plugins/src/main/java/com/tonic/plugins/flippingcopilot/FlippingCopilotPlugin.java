@@ -375,7 +375,7 @@ public class FlippingCopilotPlugin extends VitaPlugin
         {
             if (item != null && item.getId() == itemId)
             {
-                amount += item.getAmount();
+                amount += item.getQuantity();
             }
         }
         return amount;
