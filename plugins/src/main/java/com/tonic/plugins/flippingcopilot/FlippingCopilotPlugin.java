@@ -6,6 +6,7 @@ import com.google.gson.JsonParser;
 import com.google.inject.Provides;
 import com.tonic.Logger;
 import com.tonic.api.entities.NpcAPI;
+import com.tonic.api.game.WorldsAPI;
 import com.tonic.api.threaded.Delays;
 import com.tonic.api.widgets.GrandExchangeAPI;
 import com.tonic.api.widgets.InventoryAPI;
@@ -20,6 +21,7 @@ import net.runelite.api.GrandExchangeOfferState;
 import net.runelite.api.gameval.ItemID;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.plugins.PluginDescriptor;
+import net.runelite.client.ui.overlay.OverlayManager;
 
 import javax.inject.Inject;
 import java.io.BufferedReader;
@@ -70,21 +72,31 @@ public class FlippingCopilotPlugin extends VitaPlugin
     private static final class Opportunity
     {
         private final int itemId;
-        private final int quantity;
+        private final int targetQuantity;
         private final int buyPrice;
         private final int normalSellPrice;
         private final int panicSellPrice;
+        private final double roi;
         private final double score;
 
-        private Opportunity(int itemId, int quantity, int buyPrice, int normalSellPrice, int panicSellPrice, double score)
+        private Opportunity(int itemId, int targetQuantity, int buyPrice, int normalSellPrice, int panicSellPrice, double roi, double score)
         {
             this.itemId = itemId;
-            this.quantity = quantity;
+            this.targetQuantity = targetQuantity;
             this.buyPrice = buyPrice;
             this.normalSellPrice = normalSellPrice;
             this.panicSellPrice = panicSellPrice;
+            this.roi = roi;
             this.score = score;
         }
+    }
+
+    private static final class Position
+    {
+        private int quantity;
+        private long totalCost;
+        private int lastBuyPrice;
+        private int lastSellPrice;
     }
 
     @Inject
@@ -93,8 +105,22 @@ public class FlippingCopilotPlugin extends VitaPlugin
     @Inject
     private Client client;
 
+    @Inject
+    private OverlayManager overlayManager;
+
+    @Inject
+    private FlippingCopilotOverlay overlay;
+
     private final Map<Integer, Instant> activeOfferSince = new HashMap<>();
     private final Map<Integer, Instant> holdingsSince = new HashMap<>();
+    private final Map<Integer, Integer> lastInventory = new HashMap<>();
+    private final Map<Integer, Position> positions = new HashMap<>();
+
+    private Instant startTime;
+    private long gpMade;
+    private String statusText = "Idle";
+    private Opportunity currentProposed;
+    private Opportunity bestSeen;
 
     @Provides
     FlippingCopilotConfig provideConfig(ConfigManager configManager)
@@ -103,15 +129,38 @@ public class FlippingCopilotPlugin extends VitaPlugin
     }
 
     @Override
+    protected void startUp()
+    {
+        startTime = Instant.now();
+        gpMade = 0;
+        statusText = "Starting";
+        currentProposed = null;
+        bestSeen = null;
+        overlayManager.add(overlay);
+    }
+
+    @Override
+    protected void shutDown()
+    {
+        overlayManager.remove(overlay);
+        statusText = "Stopped";
+    }
+
+    @Override
     public void loop() throws Exception
     {
         if (!config.enabled() || client.getGameState() != GameState.LOGGED_IN || client.getLocalPlayer() == null)
         {
+            statusText = "Disabled / not logged in";
             return;
         }
 
+        Set<Integer> candidates = parseCandidateIds(config.candidateItemIds());
+        updatePnlTracking(candidates);
+
         if (!GrandExchangeAPI.isOpen())
         {
+            statusText = "Opening GE";
             if (config.autoOpenGe())
             {
                 openGrandExchange();
@@ -128,15 +177,9 @@ public class FlippingCopilotPlugin extends VitaPlugin
 
         pruneAndCancelStaleOffers();
 
-        if (GrandExchangeAPI.freeSlot() == -1)
-        {
-            Delays.tick(Math.max(1, config.loopDelayTicks()));
-            return;
-        }
-
-        Set<Integer> candidates = parseCandidateIds(config.candidateItemIds());
         if (candidates.isEmpty())
         {
+            statusText = "No candidate ids";
             Delays.tick(Math.max(1, config.loopDelayTicks()));
             return;
         }
@@ -144,12 +187,34 @@ public class FlippingCopilotPlugin extends VitaPlugin
         Map<Integer, MarketSnapshot> snapshots = fetchSnapshots(candidates);
         if (snapshots.isEmpty())
         {
+            statusText = "No market data";
             Delays.tick(Math.max(1, config.loopDelayTicks()));
             return;
         }
 
         List<Opportunity> opportunities = buildOpportunities(candidates, snapshots);
         opportunities.sort(Comparator.comparingDouble((Opportunity o) -> o.score).reversed());
+
+        if (opportunities.isEmpty())
+        {
+            statusText = "No viable opportunities";
+            currentProposed = null;
+            Delays.tick(Math.max(1, config.loopDelayTicks()));
+            return;
+        }
+
+        currentProposed = opportunities.get(0);
+        if (bestSeen == null || currentProposed.roi > bestSeen.roi)
+        {
+            bestSeen = currentProposed;
+        }
+
+        if (GrandExchangeAPI.freeSlot() == -1)
+        {
+            statusText = "Waiting for free GE slot";
+            Delays.tick(Math.max(1, config.loopDelayTicks()));
+            return;
+        }
 
         int take = Math.min(Math.max(1, config.targetItemsPerCycle()), opportunities.size());
         for (int i = 0; i < take; i++)
@@ -163,11 +228,13 @@ public class FlippingCopilotPlugin extends VitaPlugin
             if (submitOpportunity(opportunity))
             {
                 activeOfferSince.put(opportunity.itemId, Instant.now());
+                statusText = "Submitted " + itemName(opportunity.itemId);
                 Delays.tick(Math.max(1, config.loopDelayTicks()));
                 return;
             }
         }
 
+        statusText = "No actionable trade";
         Delays.tick(Math.max(1, config.loopDelayTicks()));
     }
 
@@ -298,6 +365,11 @@ public class FlippingCopilotPlugin extends VitaPlugin
 
         for (int itemId : candidates)
         {
+            if (isMembersOnlyItemOnFreeWorld(itemId))
+            {
+                continue;
+            }
+
             MarketSnapshot snap = snapshots.get(itemId);
             if (snap == null)
             {
@@ -319,18 +391,18 @@ public class FlippingCopilotPlugin extends VitaPlugin
             int buyPrice = applyPercent(snap.low, config.buyPriceBumpPercent(), true);
             int normalSellPrice = Math.max(buyPrice + 1, applyPercent(snap.high, -Math.abs(config.sellPriceUndercutPercent()), false));
             int panicSellPrice = Math.max(1, applyPercent(snap.low, -Math.abs(config.panicSellDiscountPercent()), false));
-            int quantity = Math.max(1, Math.min(volume / 2, maxGpPerTrade / Math.max(1, buyPrice)));
+            int targetQuantity = Math.max(1, Math.min(volume / 2, maxGpPerTrade / Math.max(1, buyPrice)));
 
-            if (quantity <= 0)
+            if (targetQuantity <= 0)
             {
                 continue;
             }
 
             long agePenalty = Math.max(0, (System.currentTimeMillis() / 1000L) - Math.min(snap.highTime, snap.lowTime));
             double freshness = 1.0 / Math.max(1.0, agePenalty / 300.0);
-            double score = (snap.high - buyPrice) * Math.log10(Math.max(10, volume)) * freshness;
+            double score = (normalSellPrice - buyPrice) * Math.log10(Math.max(10, volume)) * freshness;
 
-            opportunities.add(new Opportunity(itemId, quantity, buyPrice, normalSellPrice, panicSellPrice, score));
+            opportunities.add(new Opportunity(itemId, targetQuantity, buyPrice, normalSellPrice, panicSellPrice, roi, score));
         }
 
         return opportunities;
@@ -339,27 +411,85 @@ public class FlippingCopilotPlugin extends VitaPlugin
     private boolean submitOpportunity(Opportunity opportunity)
     {
         int inventoryAmount = inventoryAmount(opportunity.itemId);
-        int coins = inventoryAmount(ItemID.COINS);
 
-        if (inventoryAmount > 0)
+        if (inventoryAmount < opportunity.targetQuantity)
         {
-            holdingsSince.putIfAbsent(opportunity.itemId, Instant.now());
-            boolean timedOut = Duration.between(holdingsSince.get(opportunity.itemId), Instant.now()).getSeconds() >= Math.max(30, config.sellTimeoutSeconds());
-            int sellPrice = timedOut ? opportunity.panicSellPrice : opportunity.normalSellPrice;
-            int amount = Math.min(inventoryAmount, opportunity.quantity);
-            return GrandExchangeAPI.startSellOffer(opportunity.itemId, amount, sellPrice) != null;
+            int remaining = opportunity.targetQuantity - inventoryAmount;
+            int availableCoins = inventoryAmount(ItemID.COINS);
+            int affordableQuantity = Math.min(remaining, availableCoins / Math.max(1, opportunity.buyPrice));
+            if (affordableQuantity <= 0)
+            {
+                statusText = "Insufficient coins for " + itemName(opportunity.itemId);
+                return false;
+            }
+
+            Position position = positions.computeIfAbsent(opportunity.itemId, k -> new Position());
+            position.lastBuyPrice = opportunity.buyPrice;
+
+            return GrandExchangeAPI.startBuyOffer(opportunity.itemId, affordableQuantity, opportunity.buyPrice) != null;
         }
 
-        holdingsSince.remove(opportunity.itemId);
+        holdingsSince.putIfAbsent(opportunity.itemId, Instant.now());
+        boolean timedOut = Duration.between(holdingsSince.get(opportunity.itemId), Instant.now()).getSeconds() >= Math.max(30, config.sellTimeoutSeconds());
+        int sellPrice = timedOut ? opportunity.panicSellPrice : opportunity.normalSellPrice;
 
-        int affordable = coins / Math.max(1, opportunity.buyPrice);
-        int amount = Math.min(opportunity.quantity, affordable);
-        if (amount <= 0)
+        int quantityToSell = Math.min(inventoryAmount, opportunity.targetQuantity);
+        if (quantityToSell <= 0)
         {
             return false;
         }
 
-        return GrandExchangeAPI.startBuyOffer(opportunity.itemId, amount, opportunity.buyPrice) != null;
+        Position position = positions.computeIfAbsent(opportunity.itemId, k -> new Position());
+        position.lastSellPrice = sellPrice;
+
+        return GrandExchangeAPI.startSellOffer(opportunity.itemId, quantityToSell, sellPrice) != null;
+    }
+
+    private boolean isMembersOnlyItemOnFreeWorld(int itemId)
+    {
+        if (WorldsAPI.inMembersWorld())
+        {
+            return false;
+        }
+
+        String name = itemName(itemId);
+        return name.endsWith("(Members)") || name.contains("Members");
+    }
+
+    private void updatePnlTracking(Set<Integer> candidates)
+    {
+        for (int itemId : candidates)
+        {
+            int current = inventoryAmount(itemId);
+            int previous = lastInventory.getOrDefault(itemId, current);
+            int delta = current - previous;
+
+            Position p = positions.computeIfAbsent(itemId, k -> new Position());
+            if (delta > 0)
+            {
+                int price = Math.max(1, p.lastBuyPrice);
+                p.quantity += delta;
+                p.totalCost += (long) delta * price;
+                holdingsSince.putIfAbsent(itemId, Instant.now());
+            }
+            else if (delta < 0)
+            {
+                int sold = -delta;
+                int avgCost = p.quantity > 0 ? (int) Math.max(1L, p.totalCost / p.quantity) : Math.max(1, p.lastBuyPrice);
+                int sellPrice = Math.max(1, p.lastSellPrice);
+                gpMade += (long) sold * (sellPrice - avgCost);
+
+                p.quantity = Math.max(0, p.quantity - sold);
+                p.totalCost = Math.max(0L, p.totalCost - (long) sold * avgCost);
+
+                if (p.quantity == 0)
+                {
+                    holdingsSince.remove(itemId);
+                }
+            }
+
+            lastInventory.put(itemId, current);
+        }
     }
 
     private int applyPercent(int base, double pct, boolean ceil)
@@ -379,6 +509,19 @@ public class FlippingCopilotPlugin extends VitaPlugin
             }
         }
         return amount;
+    }
+
+    private String itemName(int itemId)
+    {
+        try
+        {
+            String name = client.getItemDefinition(itemId).getName();
+            return name == null ? String.valueOf(itemId) : name;
+        }
+        catch (Exception ex)
+        {
+            return String.valueOf(itemId);
+        }
     }
 
     private JsonElement readJson(String url) throws Exception
@@ -416,5 +559,49 @@ public class FlippingCopilotPlugin extends VitaPlugin
         {
             return defaultValue;
         }
+    }
+
+    public long getGpMade()
+    {
+        return gpMade;
+    }
+
+    public String getRuntimeText()
+    {
+        if (startTime == null)
+        {
+            return "00:00:00";
+        }
+
+        Duration d = Duration.between(startTime, Instant.now());
+        long h = d.toHours();
+        long m = d.toMinutesPart();
+        long s = d.toSecondsPart();
+        return String.format("%02d:%02d:%02d", h, m, s);
+    }
+
+    public String getProposedItemText()
+    {
+        if (currentProposed == null)
+        {
+            return "None";
+        }
+
+        return itemName(currentProposed.itemId) + " (" + String.format("%.2f%%", currentProposed.roi * 100.0) + ")";
+    }
+
+    public String getBestReturnItemText()
+    {
+        if (bestSeen == null)
+        {
+            return "None";
+        }
+
+        return itemName(bestSeen.itemId) + " (" + String.format("%.2f%%", bestSeen.roi * 100.0) + ")";
+    }
+
+    public String getStatusText()
+    {
+        return statusText;
     }
 }
