@@ -61,6 +61,7 @@ public class MarketMentorPlugin extends VitaPlugin
     private static final String WIKI_5M = "https://prices.runescape.wiki/api/v1/osrs/5m";
     private static final String WIKI_MAPPING = "https://prices.runescape.wiki/api/v1/osrs/mapping";
     private static final double ESTIMATED_GE_TAX = 0.01;
+    private static final int MARKET_REFRESH_SECONDS = 20;
 
     public static final class PanelOffer
     {
@@ -197,6 +198,8 @@ public class MarketMentorPlugin extends VitaPlugin
     private int lastAnnouncedSuggestionId = -1;
     private final Map<Integer, Double> itemPriorityMemory = new HashMap<>();
     private final Set<Integer> blacklistIds = new HashSet<>();
+    private List<MarketSnapshot> cachedSnapshots = new ArrayList<>();
+    private Instant lastMarketFetchAt = Instant.EPOCH;
 
     @Provides
     MarketMentorConfig provideConfig(ConfigManager configManager)
@@ -215,6 +218,8 @@ public class MarketMentorPlugin extends VitaPlugin
         currentSuggestion = null;
         bestSuggestion = null;
         lastAnnouncedSuggestionId = -1;
+        cachedSnapshots = new ArrayList<>();
+        lastMarketFetchAt = Instant.EPOCH;
         overlayManager.add(overlay);
 
         BufferedImage icon = ImageUtil.loadImageResource(getClass(), "/graph.png");
@@ -269,7 +274,7 @@ public class MarketMentorPlugin extends VitaPlugin
         collectFast();
         pruneAndCancelStaleOffers();
 
-        List<MarketSnapshot> snapshots = fetchSnapshots();
+        List<MarketSnapshot> snapshots = getMarketSnapshots();
         Map<Integer, MarketSnapshot> snapshotById = new HashMap<>();
         for (MarketSnapshot snapshot : snapshots)
         {
@@ -386,6 +391,44 @@ public class MarketMentorPlugin extends VitaPlugin
             }
         }
 
+        // Additional inventory-first liquidation pass: if any inventory item has market data, sell it before buying.
+        if (freeSlots > 0)
+        {
+            for (int itemId : getInventoryTradeableIds())
+            {
+                if (freeSlots <= 0 || itemId == ItemID.COINS || hasActiveOffer(itemId))
+                {
+                    continue;
+                }
+
+                int invAmount = inventoryAmount(itemId);
+                if (invAmount <= 0)
+                {
+                    continue;
+                }
+
+                MarketSnapshot snapshot = snapshotById.get(itemId);
+                if (snapshot == null)
+                {
+                    continue;
+                }
+
+                int buyRef = Math.max(1, snapshot.low);
+                int sellRef = Math.max(1, applyPercent(snapshot.high, -Math.abs(config.sellUndercutPct()), false));
+                Opportunity invSell = new Opportunity(itemId, buyRef, sellRef, Math.max(1, buyRef), invAmount, Math.max(1, snapshot.high - snapshot.low), Math.max(1, snapshot.minVolume()), 0.0, 0.0);
+                if (submitSell(invSell, invAmount))
+                {
+                    actions++;
+                    freeSlots--;
+                    lastTradedItemId = itemId;
+                    activeOfferSince.put(itemId, Instant.now());
+                    statusText = "Inventory sell " + itemName(itemId);
+                    collectFast();
+                    humanPause();
+                }
+            }
+        }
+
         // Backstop: if still free slots, sell any remaining tracked inventory with fallback prices.
         if (freeSlots > 0)
         {
@@ -452,7 +495,14 @@ public class MarketMentorPlugin extends VitaPlugin
             int qty = Math.min(needed, budget / Math.max(1, opportunity.buyPrice));
             if (qty <= 0)
             {
-                continue;
+                if (coins >= opportunity.buyPrice)
+                {
+                    qty = 1;
+                }
+                else
+                {
+                    continue;
+                }
             }
 
             if (submitBuy(opportunity, qty))
@@ -663,6 +713,27 @@ public class MarketMentorPlugin extends VitaPlugin
             opportunities.add(new Opportunity(snap.itemId, buyPrice, sellPrice, buyPrice, qty, spread, volume, netRoi, score));
         }
         return opportunities;
+    }
+
+    private List<MarketSnapshot> getMarketSnapshots()
+    {
+        if (cachedSnapshots.isEmpty() || Duration.between(lastMarketFetchAt, Instant.now()).getSeconds() >= MARKET_REFRESH_SECONDS)
+        {
+            cachedSnapshots = fetchSnapshots();
+            lastMarketFetchAt = Instant.now();
+        }
+        return cachedSnapshots;
+    }
+
+    public String getNextApiRefreshText()
+    {
+        if (lastMarketFetchAt == Instant.EPOCH)
+        {
+            return "now";
+        }
+
+        long remaining = MARKET_REFRESH_SECONDS - Duration.between(lastMarketFetchAt, Instant.now()).getSeconds();
+        return remaining <= 0 ? "now" : remaining + "s";
     }
 
     private List<MarketSnapshot> fetchSnapshots()
@@ -1072,6 +1143,20 @@ public class MarketMentorPlugin extends VitaPlugin
     private boolean isActiveState(GrandExchangeOfferState state)
     {
         return state == GrandExchangeOfferState.BUYING || state == GrandExchangeOfferState.SELLING;
+    }
+
+    private Set<Integer> getInventoryTradeableIds()
+    {
+        Set<Integer> ids = new HashSet<>();
+        for (ItemEx item : InventoryAPI.getItems())
+        {
+            if (item == null || item.getId() <= 0)
+            {
+                continue;
+            }
+            ids.add(item.getId());
+        }
+        return ids;
     }
 
     private int inventoryAmount(int itemId)

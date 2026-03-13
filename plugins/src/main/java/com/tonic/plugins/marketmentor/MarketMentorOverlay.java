@@ -41,6 +41,7 @@ public class MarketMentorOverlay extends OverlayPanel
         panelComponent.getChildren().add(LineComponent.builder().left("P/L").right(plugin.getProfitText()).build());
         panelComponent.getChildren().add(LineComponent.builder().left("Avg GP/hr").right(plugin.getAverageGpPerHourText()).build());
         panelComponent.getChildren().add(LineComponent.builder().left("Items flipped").right(String.valueOf(plugin.getItemsFlipped())).build());
+        panelComponent.getChildren().add(LineComponent.builder().left("API refresh").right(plugin.getNextApiRefreshText()).build());
 
         return super.render(graphics);
     }
