@@ -8,10 +8,12 @@ import com.tonic.plugins.flippingcopilot.ui.flipsdialog.FlipsDialogController;
 import com.tonic.plugins.flippingcopilot.ui.graph.model.Data;
 import com.tonic.plugins.flippingcopilot.ui.graph.model.PriceLine;
 import com.google.gson.Gson;
+import com.tonic.api.widgets.GrandExchangeAPI;
 import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
+import com.tonic.util.MessageUtil;
 import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
 import net.runelite.api.SoundEffectID;
@@ -243,6 +245,34 @@ public class SuggestionController {
         }
         if (client.getVarcIntValue(VarClientInt.INPUT_TYPE) == 14) {
             clientThread.invokeLater(gePreviousSearch::showSuggestedItemInSearch);
+        }
+        attemptAutomation(newSuggestion, accountStatus);
+    }
+
+    private void attemptAutomation(Suggestion suggestion, AccountStatus accountStatus) {
+        if (!config.automationEnabled() || suggestion == null || suggestion.isWaitSuggestion() || suggestion.isDumpSuggestion()) {
+            return;
+        }
+        if (!GrandExchangeAPI.isOpen() || accountStatus == null) {
+            return;
+        }
+
+        int quantity = Math.max(1, Math.min(suggestion.getQuantity(), Math.max(1, config.maxAutoQuantity())));
+        boolean submitted = false;
+
+        if (suggestion.isBuySuggestion()) {
+            submitted = GrandExchangeAPI.startBuyOffer(suggestion.getItemId(), quantity, suggestion.getPrice()) != null;
+        } else if (suggestion.isSellSuggestion()) {
+            long invQty = accountStatus.getInventory().getTotalAmount(suggestion.getItemId());
+            int sellQty = (int) Math.min((long) quantity, invQty);
+            if (sellQty > 0) {
+                submitted = GrandExchangeAPI.startSellOffer(suggestion.getItemId(), sellQty, suggestion.getPrice()) != null;
+            }
+        }
+
+        if (submitted) {
+            suggestion.actionedTick = client.getTickCount();
+            MessageUtil.sendChatMessage("[Flipping Copilot] Automated " + suggestion.offerType() + " submitted for " + suggestion.getName());
         }
     }
 

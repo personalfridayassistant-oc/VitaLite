@@ -35,6 +35,10 @@ public class ApiRequestHandler {
     private static final String serverUrl = System.getenv("FLIPPING_COPILOT_HOST") != null ? System.getenv("FLIPPING_COPILOT_HOST")  : "https://api.flippingcopilot.com";
     private static final String serverFeUrl = serverUrl.replace("api.", "");
     private static final String OSRS_WIKI_PRICES_URL = "https://prices.runescape.wiki/api/v1/osrs/latest";
+    private static final String OSRS_ITEM_DETAIL_URL = "https://secure.runescape.com/m=itemdb_oldschool/api/catalogue/detail.json?item=";
+    private static final String OSRS_WIKI_USER_AGENT = "flipping-copilot";
+    private static final long ITEM_DETAIL_CACHE_MS = TimeUnit.HOURS.toMillis(2);
+    private static final int DETAIL_SCAN_LIMIT = 40;
     public static final String DEFAULT_COPILOT_PRICE_ERROR_MESSAGE = "Unable to fetch price copilot price (possible server update)";
     public static final String DEFAULT_PREMIUM_INSTANCE_ERROR_MESSAGE = "Error loading premium instance data (possible server update)";
     public static final String UNKNOWN_ERROR = "Unknown error";
@@ -45,6 +49,7 @@ public class ApiRequestHandler {
     private final CopilotLoginRS copilotLoginRS;
     private final SuggestionPreferencesManager preferencesManager;
     private final ClientThread clientThread;
+    private final Map<Integer, CachedItemDetail> itemDetailCache = new HashMap<>();
 
 
     public void authenticate(String username, String password, Consumer<LoginResponse> successCallback, Consumer<String> failureCallback) {
@@ -912,8 +917,9 @@ public class ApiRequestHandler {
                         // Return a wait suggestion if no good flip found
                         suggestion = new Suggestion("wait", 0, 0, 0, 0, "", 0, "No good flips found", null, null, null, null, false, -1);
                     }
-                    
-                    clientThread.invoke(() -> suggestionConsumer.accept(suggestion));
+                    final Suggestion resolvedSuggestion = suggestion;
+
+                    clientThread.invoke(() -> suggestionConsumer.accept(resolvedSuggestion));
                     
                 } catch (Exception e) {
                     log.warn("error reading/parsing OSRS Wiki prices response", e);
@@ -928,66 +934,257 @@ public class ApiRequestHandler {
      * This is a simple heuristic that looks for items with good high-low spread.
      */
     private Suggestion findBestFlipSuggestion(JsonObject priceData) {
-        int bestItemId = -1;
-        int bestSpread = 0;
-        int bestBuyPrice = 0;
-        int bestSellPrice = 0;
-        
-        // Common flip items - item IDs for popular flipping items
-        int[] commonFlipItems = {
-            4151, 995, 454, 1127, 1079, 1183, 1249, 4087, 4152, 560,
-            565, 566, 573, 574, 575, 577, 558, 555, 554, 557,
-            1637, 1631, 1623, 1635, 1617, 2361, 2363, 2357, 2353, 2351,
-            2349, 438, 440, 372, 379, 3144, 19468, 268, 2441, 2445,
-            2443, 3024, 12695, 6693, 1514, 1516, 1518, 1520, 1521, 12598,
-            2485, 5308, 196, 221, 10835, 2347, 2362, 2359, 2355, 2349,
-            2398, 1632, 1115, 1135, 1079, 1123, 1093, 1067, 1079
-        };
-        
-        for (int itemId : commonFlipItems) {
-            String itemKey = String.valueOf(itemId);
-            if (priceData.has(itemKey)) {
-                JsonObject itemData = priceData.getAsJsonObject(itemKey);
-                if (itemData.has("low") && itemData.has("high")) {
-                    int lowPrice = itemData.get("low").getAsInt();
-                    int highPrice = itemData.get("high").getAsInt();
-                    
-                    if (lowPrice > 0 && highPrice > lowPrice) {
-                        int spread = highPrice - lowPrice;
-                        // Look for items with at least 3% margin and meaningful spread
-                        double margin = (double) spread / lowPrice;
-                        if (margin >= 0.03 && spread > bestSpread) {
-                            bestSpread = spread;
-                            bestItemId = itemId;
-                            bestBuyPrice = lowPrice;
-                            bestSellPrice = highPrice;
-                        }
-                    }
-                }
+        List<MarketCandidate> candidates = new ArrayList<>();
+
+        for (Map.Entry<String, JsonElement> entry : priceData.entrySet()) {
+            int itemId;
+            try {
+                itemId = Integer.parseInt(entry.getKey());
+            } catch (NumberFormatException ex) {
+                continue;
             }
+            JsonObject itemData = entry.getValue().getAsJsonObject();
+            int lowPrice = getInt(itemData, "low", 0);
+            int highPrice = getInt(itemData, "high", 0);
+            int lowVolume = getInt(itemData, "lowTime", 0);
+            int highVolume = getInt(itemData, "highTime", 0);
+            if (lowPrice <= 0 || highPrice <= lowPrice) {
+                continue;
+            }
+
+            int spread = highPrice - lowPrice;
+            double margin = (double) spread / lowPrice;
+            if (margin < 0.015 || spread < 10) {
+                continue;
+            }
+            int volumeSignal = Math.max(1, Math.min(lowVolume, highVolume));
+            double quickScore = spread * Math.log(volumeSignal + 1.0);
+            candidates.add(new MarketCandidate(itemId, lowPrice, highPrice, spread, margin, volumeSignal, quickScore));
         }
-        
-        if (bestItemId == -1) {
+
+        if (candidates.isEmpty()) {
             return null;
         }
-        
-        String itemName = "Item " + bestItemId;
-        
-        return new Suggestion(
-            "buy",
-            0,
-            bestItemId,
-            bestBuyPrice,
-            1,
-            itemName,
-            0,
-            "Buy " + itemName + " for " + bestBuyPrice + "gp (sell at " + bestSellPrice + ")",
-            (double) bestSpread,
-            null,
-            null,
-            null,
-            false,
-            -1
+
+        candidates.sort(Comparator.comparingDouble((MarketCandidate c) -> c.quickScore).reversed());
+        List<MarketCandidate> scanned = candidates.subList(0, Math.min(DETAIL_SCAN_LIMIT, candidates.size()));
+
+        MarketCandidate best = null;
+        double bestScore = Double.NEGATIVE_INFINITY;
+        for (MarketCandidate candidate : scanned) {
+            ItemDetail detail = fetchItemDetail(candidate.itemId);
+            if (detail == null || detail.name == null || detail.name.isBlank()) {
+                continue;
+            }
+            double combinedScore = scoreCandidateWithDetail(candidate, detail);
+            if (combinedScore > bestScore) {
+                bestScore = combinedScore;
+                best = candidate.withDetail(detail);
+            }
+        }
+
+        if (best == null || best.detail == null) {
+            return null;
+        }
+
+        int quantity = Math.max(1, computeTargetQuantity(best));
+        int expectedProfitPerItem = Math.max(1, best.spread - (int) Math.ceil(best.highPrice * 0.01));
+        String message = String.format(
+                "Buy %s for %,d gp x %,d. Suggested sell: %,d gp x %,d. Signals: %s",
+                best.detail.name,
+                best.lowPrice,
+                quantity,
+                best.highPrice,
+                quantity,
+                buildSignalSummary(best.detail)
         );
+
+        return new Suggestion(
+                "buy",
+                0,
+                best.itemId,
+                best.lowPrice,
+                quantity,
+                best.detail.name,
+                0,
+                message,
+                (double) expectedProfitPerItem * quantity,
+                null,
+                null,
+                null,
+                false,
+                -1
+        );
+    }
+
+    private int computeTargetQuantity(MarketCandidate best) {
+        int limitFromVolume = Math.max(1, best.volumeSignal / 8);
+        if (best.lowPrice <= 1_000) {
+            return Math.min(500, limitFromVolume);
+        }
+        if (best.lowPrice <= 50_000) {
+            return Math.min(100, limitFromVolume);
+        }
+        return Math.min(20, limitFromVolume);
+    }
+
+    private double scoreCandidateWithDetail(MarketCandidate candidate, ItemDetail detail) {
+        double score = candidate.quickScore;
+        score += candidate.margin * 2_000;
+        score += detail.day30ChangePct * 8;
+        score += detail.day90ChangePct * 5;
+        score += detail.day180ChangePct * 3;
+        if ("positive".equalsIgnoreCase(detail.todayTrend)) {
+            score += 50;
+        } else if ("negative".equalsIgnoreCase(detail.todayTrend)) {
+            score -= 50;
+        }
+        if ("negative".equalsIgnoreCase(detail.currentTrend)) {
+            score -= 25;
+        }
+        return score;
+    }
+
+    private String buildSignalSummary(ItemDetail detail) {
+        return String.format(
+                "today=%s, 30d=%+.1f%%, 90d=%+.1f%%, 180d=%+.1f%%",
+                detail.todayTrend,
+                detail.day30ChangePct,
+                detail.day90ChangePct,
+                detail.day180ChangePct
+        );
+    }
+
+    private ItemDetail fetchItemDetail(int itemId) {
+        synchronized (itemDetailCache) {
+            CachedItemDetail cached = itemDetailCache.get(itemId);
+            if (cached != null && System.currentTimeMillis() - cached.loadedAtMs < ITEM_DETAIL_CACHE_MS) {
+                return cached.detail;
+            }
+        }
+
+        Request request = new Request.Builder()
+                .url(OSRS_ITEM_DETAIL_URL + itemId)
+                .addHeader("Accept", "application/json")
+                .addHeader("User-Agent", OSRS_WIKI_USER_AGENT)
+                .get()
+                .build();
+
+        try (Response response = client.newCall(request).execute()) {
+            if (!response.isSuccessful() || response.body() == null) {
+                return null;
+            }
+            String body = response.body().string();
+            JsonObject jsonResponse = JsonParser.parseString(body).getAsJsonObject();
+            JsonObject item = jsonResponse.getAsJsonObject("item");
+            if (item == null) {
+                return null;
+            }
+            ItemDetail detail = ItemDetail.from(item);
+            synchronized (itemDetailCache) {
+                itemDetailCache.put(itemId, new CachedItemDetail(detail, System.currentTimeMillis()));
+            }
+            return detail;
+        } catch (Exception e) {
+            log.debug("Failed to fetch item detail for item {}", itemId, e);
+            return null;
+        }
+    }
+
+    private int getInt(JsonObject object, String key, int defaultValue) {
+        if (object == null || !object.has(key) || object.get(key).isJsonNull()) {
+            return defaultValue;
+        }
+        try {
+            return object.get(key).getAsInt();
+        } catch (Exception e) {
+            return defaultValue;
+        }
+    }
+
+    private static final class CachedItemDetail {
+        private final ItemDetail detail;
+        private final long loadedAtMs;
+
+        private CachedItemDetail(ItemDetail detail, long loadedAtMs) {
+            this.detail = detail;
+            this.loadedAtMs = loadedAtMs;
+        }
+    }
+
+    private static final class ItemDetail {
+        private final String name;
+        private final String currentTrend;
+        private final String todayTrend;
+        private final double day30ChangePct;
+        private final double day90ChangePct;
+        private final double day180ChangePct;
+
+        private ItemDetail(String name, String currentTrend, String todayTrend, double day30ChangePct, double day90ChangePct, double day180ChangePct) {
+            this.name = name;
+            this.currentTrend = currentTrend;
+            this.todayTrend = todayTrend;
+            this.day30ChangePct = day30ChangePct;
+            this.day90ChangePct = day90ChangePct;
+            this.day180ChangePct = day180ChangePct;
+        }
+
+        private static ItemDetail from(JsonObject item) {
+            return new ItemDetail(
+                    getString(item, "name", "Unknown item"),
+                    getString(item.getAsJsonObject("current"), "trend", "neutral"),
+                    getString(item.getAsJsonObject("today"), "trend", "neutral"),
+                    parsePercent(item.getAsJsonObject("day30"), "change"),
+                    parsePercent(item.getAsJsonObject("day90"), "change"),
+                    parsePercent(item.getAsJsonObject("day180"), "change")
+            );
+        }
+
+        private static double parsePercent(JsonObject object, String key) {
+            String value = getString(object, key, "0");
+            String cleaned = value.replace("%", "").replace("+", "").trim();
+            try {
+                return Double.parseDouble(cleaned);
+            } catch (NumberFormatException ex) {
+                return 0;
+            }
+        }
+
+        private static String getString(JsonObject object, String key, String defaultValue) {
+            if (object == null || !object.has(key) || object.get(key).isJsonNull()) {
+                return defaultValue;
+            }
+            try {
+                return object.get(key).getAsString();
+            } catch (Exception ex) {
+                return defaultValue;
+            }
+        }
+    }
+
+    private static final class MarketCandidate {
+        private final int itemId;
+        private final int lowPrice;
+        private final int highPrice;
+        private final int spread;
+        private final double margin;
+        private final int volumeSignal;
+        private final double quickScore;
+        private ItemDetail detail;
+
+        private MarketCandidate(int itemId, int lowPrice, int highPrice, int spread, double margin, int volumeSignal, double quickScore) {
+            this.itemId = itemId;
+            this.lowPrice = lowPrice;
+            this.highPrice = highPrice;
+            this.spread = spread;
+            this.margin = margin;
+            this.volumeSignal = volumeSignal;
+            this.quickScore = quickScore;
+        }
+
+        private MarketCandidate withDetail(ItemDetail detail) {
+            this.detail = detail;
+            return this;
+        }
     }
 }
