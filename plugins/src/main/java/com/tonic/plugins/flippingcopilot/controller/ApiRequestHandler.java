@@ -876,7 +876,8 @@ public class ApiRequestHandler {
      * Fetches prices from the OSRS Wiki API and generates a suggestion based on price spread.
      * This provides local suggestions without requiring the flippingcopilot.com server.
      */
-    public void getSuggestionFromOsrsWikiAsync(Consumer<Suggestion> suggestionConsumer,
+    public void getSuggestionFromOsrsWikiAsync(long cashStack,
+                                               Consumer<Suggestion> suggestionConsumer,
                                                Consumer<HttpResponseException> onFailure) {
         log.debug("Fetching prices from OSRS Wiki API");
         Request request = new Request.Builder()
@@ -912,7 +913,7 @@ public class ApiRequestHandler {
                     }
                     
                     // Find items with good price spread (potential for profit)
-                    Suggestion suggestion = findBestFlipSuggestion(data);
+                    Suggestion suggestion = findBestFlipSuggestion(data, cashStack);
                     if (suggestion == null) {
                         // Return a wait suggestion if no good flip found
                         suggestion = new Suggestion("wait", 0, 0, 0, 0, "", 0, "No good flips found", null, null, null, null, false, -1);
@@ -933,7 +934,7 @@ public class ApiRequestHandler {
      * Analyzes price data and finds the best flip suggestion based on price spread.
      * This is a simple heuristic that looks for items with good high-low spread.
      */
-    private Suggestion findBestFlipSuggestion(JsonObject priceData) {
+    private Suggestion findBestFlipSuggestion(JsonObject priceData, long cashStack) {
         List<MarketCandidate> candidates = new ArrayList<>();
 
         for (Map.Entry<String, JsonElement> entry : priceData.entrySet()) {
@@ -955,6 +956,10 @@ public class ApiRequestHandler {
             int spread = highPrice - lowPrice;
             double margin = (double) spread / lowPrice;
             if (margin < 0.015 || spread < 10) {
+                continue;
+            }
+            long affordableQty = lowPrice <= 0 ? 0 : cashStack / lowPrice;
+            if (cashStack > 0 && affordableQty <= 0) {
                 continue;
             }
             int volumeSignal = Math.max(1, Math.min(lowVolume, highVolume));
@@ -988,14 +993,19 @@ public class ApiRequestHandler {
         }
 
         int quantity = Math.max(1, computeTargetQuantity(best));
+        if (cashStack > 0) {
+            long affordableQty = cashStack / best.lowPrice;
+            quantity = (int) Math.max(1L, Math.min((long) quantity, affordableQty));
+        }
         int expectedProfitPerItem = Math.max(1, best.spread - (int) Math.ceil(best.highPrice * 0.01));
         String message = String.format(
-                "Buy %s for %,d gp x %,d. Suggested sell: %,d gp x %,d. Signals: %s",
+                "Buy %s for %,d gp x %,d. Suggested sell: %,d gp x %,d. Cashstack: %,d gp. Signals: %s",
                 best.detail.name,
                 best.lowPrice,
                 quantity,
                 best.highPrice,
                 quantity,
+                cashStack,
                 buildSignalSummary(best.detail)
         );
 

@@ -156,8 +156,13 @@ public class SuggestionController {
                 suggestionPanel.refresh();
             };
             
-            log.debug("tick {} getting suggestion from OSRS Wiki API", client.getTickCount());
-            apiRequestHandler.getSuggestionFromOsrsWikiAsync(suggestionConsumer, onFailure);
+            long cashStack = 0L;
+            AccountStatus localStatus = accountStatusManager.getAccountStatus();
+            if (localStatus != null) {
+                cashStack = localStatus.currentCashStack();
+            }
+            log.debug("tick {} getting suggestion from OSRS Wiki API with cash stack {}", client.getTickCount(), cashStack);
+            apiRequestHandler.getSuggestionFromOsrsWikiAsync(cashStack, suggestionConsumer, onFailure);
             return;
         }
         
