@@ -263,8 +263,8 @@ public class SuggestionController {
         if (suggestion.isBuySuggestion()) {
             submitted = GrandExchangeAPI.startBuyOffer(suggestion.getItemId(), quantity, suggestion.getPrice()) != null;
         } else if (suggestion.isSellSuggestion()) {
-            int invQty = accountStatus.getInventory().getTotalAmount(suggestion.getItemId());
-            int sellQty = Math.min(quantity, invQty);
+            long invQty = accountStatus.getInventory().getTotalAmount(suggestion.getItemId());
+            int sellQty = (int) Math.min((long) quantity, invQty);
             if (sellQty > 0) {
                 submitted = GrandExchangeAPI.startSellOffer(suggestion.getItemId(), sellQty, suggestion.getPrice()) != null;
             }
