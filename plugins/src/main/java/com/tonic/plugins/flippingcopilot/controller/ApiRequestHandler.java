@@ -917,8 +917,9 @@ public class ApiRequestHandler {
                         // Return a wait suggestion if no good flip found
                         suggestion = new Suggestion("wait", 0, 0, 0, 0, "", 0, "No good flips found", null, null, null, null, false, -1);
                     }
-                    
-                    clientThread.invoke(() -> suggestionConsumer.accept(suggestion));
+                    final Suggestion resolvedSuggestion = suggestion;
+
+                    clientThread.invoke(() -> suggestionConsumer.accept(resolvedSuggestion));
                     
                 } catch (Exception e) {
                     log.warn("error reading/parsing OSRS Wiki prices response", e);
