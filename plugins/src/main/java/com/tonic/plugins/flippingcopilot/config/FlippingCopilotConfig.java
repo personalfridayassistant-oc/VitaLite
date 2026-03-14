@@ -298,4 +298,26 @@ public interface FlippingCopilotConfig extends Config
     }
 
 
+    @ConfigItem(
+            keyName = "automationEnabled",
+            name = "Enable VitaLite GE automation",
+            description = "Uses VitaLite automation APIs to automatically place suggested buy/sell offers.",
+            position = 7
+    )
+    default boolean automationEnabled()
+    {
+        return false;
+    }
+
+    @ConfigItem(
+            keyName = "maxAutoQuantity",
+            name = "Max auto quantity",
+            description = "Caps the quantity used by automated suggestion placement.",
+            position = 8
+    )
+    default int maxAutoQuantity()
+    {
+        return 50;
+    }
+
 }
