@@ -27,6 +27,8 @@ import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.ui.overlay.OverlayManager;
 import net.runelite.client.util.ImageUtil;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.inject.Inject;
 import java.awt.image.BufferedImage;
@@ -52,8 +54,10 @@ import java.util.Set;
 )
 public class Flipper0Plugin extends VitaPlugin
 {
+    private static final Logger log = LoggerFactory.getLogger(Flipper0Plugin.class);
+
     private static final String[] SUGGESTION_ENDPOINTS = {
-            "http://localhost:3015/api/v1/suggestions/runelite?limit=1000",
+            "http://192.168.1.27:3015/api/v1/suggestions/runelite?limit=1000",
             "http://192.168.1.27:3015/api/v1/suggestions?limit=100",
             "http://192.168.1.27/api/v1/suggestions/runelite?limit=25"
     };
@@ -100,6 +104,19 @@ public class Flipper0Plugin extends VitaPlugin
     private String coinsText = "0";
     private String apiHealthText = "Unknown";
     private boolean apiHealthy;
+    private String lastSuggestionDebug = "No fetch yet";
+
+    private static class FilterStats
+    {
+        int accepted;
+        int invalidPrice;
+        int blacklisted;
+        int lowVolume;
+        int stale;
+        int membersBlocked;
+        int untradeable;
+        int overBudget;
+    }
 
     @Provides
     Flipper0Config provideConfig(ConfigManager configManager)
@@ -110,6 +127,7 @@ public class Flipper0Plugin extends VitaPlugin
     @Override
     protected void startUp()
     {
+        log.info("Flipper0 starting up");
         runtimeBlacklist.clear();
         suggestions.clear();
         activeOfferSince.clear();
@@ -122,6 +140,7 @@ public class Flipper0Plugin extends VitaPlugin
         lastHealthCheck = Instant.EPOCH;
         apiHealthy = false;
         apiHealthText = "Unknown";
+        lastSuggestionDebug = "No fetch yet";
 
         overlayManager.add(overlay);
         BufferedImage icon = ImageUtil.loadImageResource(getClass(), "/graph.png");
@@ -132,6 +151,7 @@ public class Flipper0Plugin extends VitaPlugin
     @Override
     protected void shutDown()
     {
+        log.info("Flipper0 shutting down");
         overlayManager.remove(overlay);
         if (navButton != null)
         {
@@ -162,13 +182,25 @@ public class Flipper0Plugin extends VitaPlugin
         cancelStaleOffers();
         collectOffers();
 
-        List<Suggestion> filtered = filteredSuggestions();
+        FilterStats stats = new FilterStats();
+        List<Suggestion> filtered = filteredSuggestions(stats);
         currentSuggestion = pickCurrent(filtered);
         nextSuggestion = filtered.size() > 1 ? filtered.get(Math.min(skipCount + 1, filtered.size() - 1)) : null;
 
         if (currentSuggestion == null)
         {
             statusText = suggestions.isEmpty() ? "No API suggestions" : "No eligible suggestions";
+            log.info("No active recommendation. status='{}' parsed={} accepted={} invalidPrice={} lowVolume={} stale={} membersBlocked={} untradeable={} overBudget={} blacklisted={}",
+                    statusText,
+                    suggestions.size(),
+                    stats.accepted,
+                    stats.invalidPrice,
+                    stats.lowVolume,
+                    stats.stale,
+                    stats.membersBlocked,
+                    stats.untradeable,
+                    stats.overBudget,
+                    stats.blacklisted);
             refreshPanel();
             Delays.tick(1);
             return;
@@ -204,6 +236,14 @@ public class Flipper0Plugin extends VitaPlugin
             statusText = "Monitoring offers / awaiting fills";
         }
 
+        log.debug("Loop status='{}' current={} next={} freeSlots={} coins={} api={}",
+                statusText,
+                currentSuggestion != null ? currentSuggestion.name : "none",
+                nextSuggestion != null ? nextSuggestion.name : "none",
+                getFreeEligibleSlots(),
+                coinsText,
+                apiHealthText);
+
         refreshPanel();
         Delays.tick(Math.max(1, config.loopDelayTicks()));
     }
@@ -221,14 +261,17 @@ public class Flipper0Plugin extends VitaPlugin
             suggestions.clear();
             suggestions.addAll(fresh);
             statusText = "Loaded " + fresh.size() + " suggestions";
+            log.info("Loaded {} suggestions from API endpoints", fresh.size());
         }
         else if (suggestions.isEmpty())
         {
             statusText = "Suggestion API returned no items";
+            log.warn("Suggestion API returned no items. {}", lastSuggestionDebug);
         }
         else
         {
             statusText = "Using cached suggestions (api empty)";
+            log.warn("API returned no new items; using cached suggestions ({} cached). {}", suggestions.size(), lastSuggestionDebug);
         }
 
         lastFetch = Instant.now();
@@ -244,6 +287,7 @@ public class Flipper0Plugin extends VitaPlugin
 
         apiHealthy = isHealthEndpointUp();
         apiHealthText = apiHealthy ? "Up" : "Down";
+        log.debug("Health check {} -> {}", HEALTH_ENDPOINT, apiHealthText);
         lastHealthCheck = Instant.now();
     }
 
@@ -266,7 +310,7 @@ public class Flipper0Plugin extends VitaPlugin
         }
     }
 
-    private List<Suggestion> filteredSuggestions()
+    private List<Suggestion> filteredSuggestions(FilterStats stats)
     {
         int spendable = Math.max(0, coinsOnHand() - config.coinReserve());
         boolean memberWorld = WorldsAPI.inMembersWorld();
@@ -278,35 +322,43 @@ public class Flipper0Plugin extends VitaPlugin
         {
             if (s == null || s.itemId <= 0 || s.buyPrice <= 0 || s.sellPrice <= s.buyPrice)
             {
+                stats.invalidPrice++;
                 continue;
             }
             if (runtimeBlacklist.contains(s.itemId))
             {
+                stats.blacklisted++;
                 continue;
             }
             if (s.minVolume < minVolume)
             {
+                stats.lowVolume++;
                 continue;
             }
             if (s.ts > 0 && Instant.now().getEpochSecond() - s.ts > config.maxDataAgeSeconds())
             {
+                stats.stale++;
                 continue;
             }
             if (!memberWorld && s.members)
             {
+                stats.membersBlocked++;
                 continue;
             }
             if (!isTradeableForAccount(s.itemId, memberWorld))
             {
+                stats.untradeable++;
                 continue;
             }
 
             int effectiveBudget = Math.min(spendable, maxTradeBudget);
             if (effectiveBudget < s.buyPrice)
             {
+                stats.overBudget++;
                 continue;
             }
 
+            stats.accepted++;
             filtered.add(s);
         }
 
@@ -348,10 +400,12 @@ public class Flipper0Plugin extends VitaPlugin
             long estimated = (long) qty * (price - suggestion.buyPrice);
             realizedProfit += Math.max(0, estimated);
             statusText = "Placed sell for " + suggestion.name;
+            log.info("Placed sell offer item={} name={} qty={} price={}", suggestion.itemId, suggestion.name, qty, price);
             return true;
         }
 
         statusText = "Sell failed for " + suggestion.name;
+        log.warn("Failed placing sell offer item={} name={} qty={} price={}", suggestion.itemId, suggestion.name, qty, price);
         return false;
     }
 
@@ -379,10 +433,12 @@ public class Flipper0Plugin extends VitaPlugin
         {
             activeOfferSince.put(suggestion.itemId, Instant.now());
             statusText = "Placed buy for " + suggestion.name + " x" + qty;
+            log.info("Placed buy offer item={} name={} qty={} price={}", suggestion.itemId, suggestion.name, qty, suggestion.buyPrice);
             return true;
         }
 
         statusText = "Buy failed for " + suggestion.name;
+        log.warn("Failed placing buy offer item={} name={} qty={} price={}", suggestion.itemId, suggestion.name, qty, suggestion.buyPrice);
         return false;
     }
 
@@ -423,6 +479,7 @@ public class Flipper0Plugin extends VitaPlugin
             if (started != null && Duration.between(started, now).getSeconds() >= timeout)
             {
                 GrandExchangeAPI.abortOffer(offer.getItemId());
+                log.info("Cancelled stale offer item={} state={} ageSec={}", offer.getItemId(), offer.getState(), Duration.between(started, now).getSeconds());
                 clearNumericDialogue();
                 activeOfferSince.put(offer.getItemId(), now);
                 statusText = "Cancelled stale offer " + offer.getItemId();
@@ -440,6 +497,7 @@ public class Flipper0Plugin extends VitaPlugin
         for (int i = 0; i < 2 && GrandExchangeAPI.canCollect(); i++)
         {
             GrandExchangeAPI.collectAll();
+            log.debug("Collecting GE offers pass={}", i + 1);
             Delays.wait(20);
         }
     }
@@ -528,22 +586,29 @@ public class Flipper0Plugin extends VitaPlugin
     private List<Suggestion> fetchSuggestions()
     {
         List<Suggestion> out = new ArrayList<>();
+        List<String> endpointDebug = new ArrayList<>();
 
         for (String endpoint : SUGGESTION_ENDPOINTS)
         {
-            List<Suggestion> parsed = fetchSuggestionsFromEndpoint(endpoint);
+            List<Suggestion> parsed = fetchSuggestionsFromEndpoint(endpoint, endpointDebug);
             if (!parsed.isEmpty())
             {
                 out.addAll(parsed);
+                lastSuggestionDebug = String.join(" | ", endpointDebug);
                 break;
             }
+        }
+
+        if (out.isEmpty())
+        {
+            lastSuggestionDebug = endpointDebug.isEmpty() ? "No endpoints attempted" : String.join(" | ", endpointDebug);
         }
 
         dedupeByItemIdKeepBest(out);
         return out;
     }
 
-    private List<Suggestion> fetchSuggestionsFromEndpoint(String endpoint)
+    private List<Suggestion> fetchSuggestionsFromEndpoint(String endpoint, List<String> endpointDebug)
     {
         List<Suggestion> out = new ArrayList<>();
         try
@@ -558,6 +623,7 @@ public class Flipper0Plugin extends VitaPlugin
             int code = conn.getResponseCode();
             if (code < 200 || code >= 300)
             {
+                endpointDebug.add(endpoint + " -> HTTP " + code);
                 return out;
             }
 
@@ -572,41 +638,40 @@ public class Flipper0Plugin extends VitaPlugin
             }
 
             JsonElement root = JsonParser.parseString(sb.toString());
-            JsonArray arr = findSuggestionArray(root);
-            if (arr == null)
+            log.debug("Fetched endpoint={} bytes={}", endpoint, sb.length());
+            List<JsonObject> objects = extractSuggestionObjects(root);
+            if (objects.isEmpty())
             {
+                endpointDebug.add(endpoint + " -> parsed 0 items (no suggestion array/object)");
                 return out;
             }
 
-            for (JsonElement element : arr)
+            for (JsonObject object : objects)
             {
-                Suggestion suggestion = parseSuggestionElement(element);
+                Suggestion suggestion = parseSuggestionElement(object);
                 if (suggestion != null)
                 {
                     out.add(suggestion);
                 }
             }
 
+            endpointDebug.add(endpoint + " -> parsed " + out.size() + " valid suggestions from " + objects.size() + " records");
+
             return out;
         }
-        catch (Exception ignored)
+        catch (Exception ex)
         {
+            endpointDebug.add(endpoint + " -> " + ex.getClass().getSimpleName() + ": " + ex.getMessage());
             return out;
         }
     }
 
-    private Suggestion parseSuggestionElement(JsonElement element)
+    private Suggestion parseSuggestionElement(JsonObject obj)
     {
-        if (element == null || element.isJsonNull())
+        if (obj == null)
         {
             return null;
         }
-        if (!element.isJsonObject())
-        {
-            return null;
-        }
-
-        JsonObject obj = element.getAsJsonObject();
         JsonObject itemObj = obj.has("item") && obj.get("item").isJsonObject() ? obj.getAsJsonObject("item") : obj;
         JsonObject pricesObj = obj.has("prices") && obj.get("prices").isJsonObject() ? obj.getAsJsonObject("prices") : obj;
         JsonObject metricsObj = obj.has("metrics") && obj.get("metrics").isJsonObject() ? obj.getAsJsonObject("metrics") : obj;
@@ -624,22 +689,32 @@ public class Flipper0Plugin extends VitaPlugin
         int high = pickPositive(
                 getInt(obj, "high", -1),
                 getInt(obj, "highPrice", -1),
+                getInt(obj, "high_price", -1),
                 getInt(obj, "sellPrice", -1),
+                getInt(obj, "sell_price", -1),
                 getInt(obj, "sell", -1),
+                getInt(obj, "targetSell", -1),
+                getInt(obj, "target_sell", -1),
                 getInt(pricesObj, "high", -1),
                 getInt(pricesObj, "sell", -1),
                 getInt(pricesObj, "sellPrice", -1),
+                getInt(pricesObj, "sell_price", -1),
                 getInt(itemObj, "high", -1)
         );
 
         int low = pickPositive(
                 getInt(obj, "low", -1),
                 getInt(obj, "lowPrice", -1),
+                getInt(obj, "low_price", -1),
                 getInt(obj, "buyPrice", -1),
+                getInt(obj, "buy_price", -1),
                 getInt(obj, "buy", -1),
+                getInt(obj, "targetBuy", -1),
+                getInt(obj, "target_buy", -1),
                 getInt(pricesObj, "low", -1),
                 getInt(pricesObj, "buy", -1),
                 getInt(pricesObj, "buyPrice", -1),
+                getInt(pricesObj, "buy_price", -1),
                 getInt(itemObj, "low", -1)
         );
 
@@ -650,6 +725,7 @@ public class Flipper0Plugin extends VitaPlugin
                 getInt(obj, "volume", -1),
                 getInt(obj, "volume_5m", -1),
                 getInt(obj, "fiveMinuteVolume", -1),
+                getInt(obj, "min_volume", -1),
                 getInt(metricsObj, "minVolume", -1),
                 getInt(metricsObj, "volume", -1),
                 getInt(metricsObj, "volume_5m", -1),
@@ -678,6 +754,8 @@ public class Flipper0Plugin extends VitaPlugin
                 getLong(obj, "timestamp", -1),
                 getLong(obj, "updatedAt", -1),
                 getLong(obj, "updated_at", -1),
+                getLong(metricsObj, "updatedAt", -1),
+                getLong(metricsObj, "updated_at", -1),
                 getLong(itemObj, "updatedAt", -1),
                 Instant.now().getEpochSecond()
         ));
@@ -695,39 +773,75 @@ public class Flipper0Plugin extends VitaPlugin
         return s;
     }
 
-    private JsonArray findSuggestionArray(JsonElement root)
+    private List<JsonObject> extractSuggestionObjects(JsonElement root)
     {
+        List<JsonObject> out = new ArrayList<>();
         if (root == null || root.isJsonNull())
         {
-            return null;
+            return out;
         }
+
         if (root.isJsonArray())
         {
-            return root.getAsJsonArray();
+            addObjectsFromArray(root.getAsJsonArray(), out);
+            return out;
         }
         if (!root.isJsonObject())
         {
-            return null;
+            return out;
         }
 
         JsonObject obj = root.getAsJsonObject();
-        if (obj.has("suggestions") && obj.get("suggestions").isJsonArray())
+        String[] keys = {"suggestions", "data", "items", "results", "opportunities"};
+        for (String key : keys)
         {
-            return obj.getAsJsonArray("suggestions");
+            if (!obj.has(key) || obj.get(key).isJsonNull())
+            {
+                continue;
+            }
+
+            JsonElement child = obj.get(key);
+            if (child.isJsonArray())
+            {
+                addObjectsFromArray(child.getAsJsonArray(), out);
+                if (!out.isEmpty())
+                {
+                    return out;
+                }
+            }
+            else if (child.isJsonObject())
+            {
+                List<JsonObject> nested = extractSuggestionObjects(child);
+                if (!nested.isEmpty())
+                {
+                    return nested;
+                }
+            }
         }
-        if (obj.has("data") && obj.get("data").isJsonArray())
+
+        if (looksLikeSuggestionObject(obj))
         {
-            return obj.getAsJsonArray("data");
+            out.add(obj);
         }
-        if (obj.has("items") && obj.get("items").isJsonArray())
+
+        return out;
+    }
+
+    private void addObjectsFromArray(JsonArray arr, List<JsonObject> out)
+    {
+        for (JsonElement e : arr)
         {
-            return obj.getAsJsonArray("items");
+            if (e != null && e.isJsonObject())
+            {
+                out.add(e.getAsJsonObject());
+            }
         }
-        if (obj.has("results") && obj.get("results").isJsonArray())
-        {
-            return obj.getAsJsonArray("results");
-        }
-        return null;
+    }
+
+    private boolean looksLikeSuggestionObject(JsonObject obj)
+    {
+        return obj.has("item") || obj.has("itemId") || obj.has("id") || obj.has("buyPrice") || obj.has("sellPrice")
+                || obj.has("buy_price") || obj.has("sell_price") || obj.has("prices");
     }
 
     private void dedupeByItemIdKeepBest(List<Suggestion> list)
@@ -854,8 +968,10 @@ public class Flipper0Plugin extends VitaPlugin
                 coinsText,
                 slotsText,
                 getGpPerHourText(),
+                apiHealthText,
+                lastSuggestionDebug,
                 currentSuggestion,
-                new ArrayList<>(filteredSuggestions()),
+                new ArrayList<>(filteredSuggestions(new FilterStats())),
                 new Flipper0Panel.Actions()
                 {
                     @Override
@@ -879,7 +995,7 @@ public class Flipper0Plugin extends VitaPlugin
 
     public boolean shouldRenderOverlay()
     {
-        return config.enabled() && client.getGameState() == GameState.LOGGED_IN;
+        return config.enabled() && config.showOverlay() && client.getGameState() == GameState.LOGGED_IN;
     }
 
     public String getStatusText() { return statusText; }
@@ -887,6 +1003,12 @@ public class Flipper0Plugin extends VitaPlugin
     public String getApiHealthText() { return apiHealthText; }
     public Suggestion getCurrentSuggestion() { return currentSuggestion; }
     public Suggestion getNextSuggestion() { return nextSuggestion; }
+
+
+    public int getOverlayOffsetY()
+    {
+        return config.overlayOffsetY();
+    }
 
     public String getGpPerHourText()
     {

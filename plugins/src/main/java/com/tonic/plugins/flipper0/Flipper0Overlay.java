@@ -23,7 +23,7 @@ public class Flipper0Overlay extends Overlay
     {
         this.plugin = plugin;
         this.itemManager = itemManager;
-        setPosition(OverlayPosition.BOTTOM_LEFT);
+        setPosition(OverlayPosition.TOP_LEFT);
         setLayer(OverlayLayer.ABOVE_WIDGETS);
     }
 
@@ -38,7 +38,7 @@ public class Flipper0Overlay extends Overlay
         int width = 250;
         int height = 198;
         int x = 10;
-        int y = 310;
+        int y = Math.max(28, 10 + plugin.getOverlayOffsetY());
 
         graphics.setColor(new Color(18, 21, 25, 220));
         graphics.fillRoundRect(x, y, width, height, 12, 12);

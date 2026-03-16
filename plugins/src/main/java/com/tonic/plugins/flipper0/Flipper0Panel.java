@@ -38,6 +38,9 @@ public class Flipper0Panel extends PluginPanel
     private final JLabel coinsLabel = new JLabel("Coins: 0");
     private final JLabel slotsLabel = new JLabel("GE Slots: 0/0");
     private final JLabel gphrLabel = new JLabel("GP/hr: 0");
+    private final JLabel apiLabel = new JLabel("API: Unknown");
+
+    private final JLabel debugLabel = new JLabel("Last fetch: n/a");
 
     private final JLabel currentIconLabel = new JLabel();
     private final JLabel currentTitleLabel = new JLabel("No recommendation yet");
@@ -78,16 +81,20 @@ public class Flipper0Panel extends PluginPanel
     {
         JPanel root = card(new BorderLayout(0, 8));
 
-        JPanel stats = new JPanel(new GridLayout(2, 2, 6, 4));
+        JPanel stats = new JPanel(new GridLayout(3, 2, 6, 4));
         stats.setBackground(ColorScheme.DARKER_GRAY_COLOR);
         styleInfo(statusLabel);
         styleInfo(coinsLabel);
         styleInfo(slotsLabel);
         styleInfo(gphrLabel);
+        styleInfo(apiLabel);
+        styleInfo(debugLabel);
         stats.add(statusLabel);
         stats.add(coinsLabel);
         stats.add(slotsLabel);
         stats.add(gphrLabel);
+        stats.add(apiLabel);
+        stats.add(debugLabel);
 
         JPanel current = new JPanel(new BorderLayout(8, 0));
         current.setOpaque(false);
@@ -119,7 +126,7 @@ public class Flipper0Panel extends PluginPanel
         return root;
     }
 
-    public void refresh(String status, String coins, String slots, String gpPerHour,
+    public void refresh(String status, String coins, String slots, String gpPerHour, String apiStatus, String debugInfo,
                         Flipper0Plugin.Suggestion current, List<Flipper0Plugin.Suggestion> top, Actions actions)
     {
         SwingUtilities.invokeLater(() -> {
@@ -127,6 +134,8 @@ public class Flipper0Panel extends PluginPanel
             coinsLabel.setText("Coins: " + coins);
             slotsLabel.setText("GE Slots: " + slots);
             gphrLabel.setText("GP/hr: " + gpPerHour);
+            apiLabel.setText("API: " + apiStatus);
+            debugLabel.setText("Last fetch: " + debugInfo);
 
             currentActions = actions;
 
