@@ -13,10 +13,15 @@ import javax.swing.BoxLayout;
 import javax.swing.JButton;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
+import javax.swing.JScrollPane;
+import javax.swing.SwingConstants;
 import javax.swing.SwingUtilities;
 import javax.swing.border.EmptyBorder;
 import java.awt.BorderLayout;
+import java.awt.Color;
 import java.awt.Dimension;
+import java.awt.FlowLayout;
+import java.awt.GridLayout;
 import java.util.List;
 
 public class Flipper0Panel extends PluginPanel
@@ -28,12 +33,21 @@ public class Flipper0Panel extends PluginPanel
     }
 
     private final ItemManager itemManager;
-    private final JLabel statusLabel = new JLabel("Status: idle");
+
+    private final JLabel statusLabel = new JLabel("Waiting for data");
     private final JLabel coinsLabel = new JLabel("Coins: 0");
-    private final JLabel slotsLabel = new JLabel("Slots: 0/0");
-    private final JLabel iconLabel = new JLabel();
-    private final JLabel suggestionLabel = new JLabel("No suggestion");
-    private final JPanel listPanel = new JPanel();
+    private final JLabel slotsLabel = new JLabel("GE Slots: 0/0");
+    private final JLabel gphrLabel = new JLabel("GP/hr: 0");
+
+    private final JLabel currentIconLabel = new JLabel();
+    private final JLabel currentTitleLabel = new JLabel("No recommendation yet");
+    private final JLabel currentMetaLabel = new JLabel("-");
+
+    private final JButton skipButton = new JButton("Skip");
+    private final JButton blacklistButton = new JButton("Blacklist");
+
+    private final JPanel listContainer = new JPanel();
+    private Actions currentActions;
 
     @Inject
     public Flipper0Panel(ItemManager itemManager)
@@ -44,103 +58,155 @@ public class Flipper0Panel extends PluginPanel
         setBackground(ColorScheme.DARK_GRAY_COLOR);
         setBorder(new EmptyBorder(10, 10, 10, 10));
 
-        JPanel header = new JPanel();
-        header.setLayout(new BoxLayout(header, BoxLayout.Y_AXIS));
-        header.setBackground(ColorScheme.DARK_GRAY_COLOR);
-        statusLabel.setFont(FontManager.getRunescapeSmallFont());
-        coinsLabel.setFont(FontManager.getRunescapeSmallFont());
-        slotsLabel.setFont(FontManager.getRunescapeSmallFont());
-        header.add(statusLabel);
-        header.add(coinsLabel);
-        header.add(slotsLabel);
+        add(buildHeaderCard(), BorderLayout.NORTH);
 
-        JPanel currentCard = new JPanel(new BorderLayout(8, 8));
-        currentCard.setBackground(ColorScheme.DARKER_GRAY_COLOR);
-        currentCard.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createLineBorder(ColorScheme.MEDIUM_GRAY_COLOR),
-                new EmptyBorder(8, 8, 8, 8)));
-        suggestionLabel.setFont(FontManager.getRunescapeBoldFont());
-        currentCard.add(iconLabel, BorderLayout.WEST);
-        currentCard.add(suggestionLabel, BorderLayout.CENTER);
+        listContainer.setLayout(new BoxLayout(listContainer, BoxLayout.Y_AXIS));
+        listContainer.setBackground(ColorScheme.DARK_GRAY_COLOR);
 
-        listPanel.setLayout(new BoxLayout(listPanel, BoxLayout.Y_AXIS));
-        listPanel.setBackground(ColorScheme.DARK_GRAY_COLOR);
+        JScrollPane scroll = new JScrollPane(listContainer);
+        scroll.setBorder(BorderFactory.createEmptyBorder());
+        scroll.getViewport().setBackground(ColorScheme.DARK_GRAY_COLOR);
+        scroll.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
 
-        JPanel top = new JPanel();
-        top.setLayout(new BoxLayout(top, BoxLayout.Y_AXIS));
-        top.setBackground(ColorScheme.DARK_GRAY_COLOR);
-        top.add(header);
-        top.add(Box.createRigidArea(new Dimension(0, 8)));
-        top.add(currentCard);
+        add(scroll, BorderLayout.CENTER);
 
-        add(top, BorderLayout.NORTH);
-        add(listPanel, BorderLayout.CENTER);
+        skipButton.addActionListener(e -> { if (currentActions != null) currentActions.skipCurrent(); });
+        blacklistButton.addActionListener(e -> { if (currentActions != null) currentActions.blacklistCurrent(); });
     }
 
-    public void refresh(String status, String coins, String slots, Flipper0Plugin.Suggestion current,
-                        List<Flipper0Plugin.Suggestion> top, Actions actions)
+    private JPanel buildHeaderCard()
+    {
+        JPanel root = card(new BorderLayout(0, 8));
+
+        JPanel stats = new JPanel(new GridLayout(2, 2, 6, 4));
+        stats.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+        styleInfo(statusLabel);
+        styleInfo(coinsLabel);
+        styleInfo(slotsLabel);
+        styleInfo(gphrLabel);
+        stats.add(statusLabel);
+        stats.add(coinsLabel);
+        stats.add(slotsLabel);
+        stats.add(gphrLabel);
+
+        JPanel current = new JPanel(new BorderLayout(8, 0));
+        current.setOpaque(false);
+        currentIconLabel.setPreferredSize(new Dimension(38, 38));
+        current.add(currentIconLabel, BorderLayout.WEST);
+
+        JPanel text = new JPanel();
+        text.setOpaque(false);
+        text.setLayout(new BoxLayout(text, BoxLayout.Y_AXIS));
+        currentTitleLabel.setFont(FontManager.getRunescapeBoldFont());
+        currentTitleLabel.setForeground(Color.WHITE);
+        currentMetaLabel.setFont(FontManager.getRunescapeSmallFont());
+        currentMetaLabel.setForeground(new Color(188, 196, 206));
+        text.add(currentTitleLabel);
+        text.add(currentMetaLabel);
+        current.add(text, BorderLayout.CENTER);
+
+        JPanel actions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
+        actions.setOpaque(false);
+        skipButton.setFocusable(false);
+        blacklistButton.setFocusable(false);
+        actions.add(skipButton);
+        actions.add(blacklistButton);
+
+        root.add(stats, BorderLayout.NORTH);
+        root.add(current, BorderLayout.CENTER);
+        root.add(actions, BorderLayout.SOUTH);
+
+        return root;
+    }
+
+    public void refresh(String status, String coins, String slots, String gpPerHour,
+                        Flipper0Plugin.Suggestion current, List<Flipper0Plugin.Suggestion> top, Actions actions)
     {
         SwingUtilities.invokeLater(() -> {
-            statusLabel.setText("Status: " + status);
+            statusLabel.setText(status);
             coinsLabel.setText("Coins: " + coins);
-            slotsLabel.setText("Slots: " + slots);
+            slotsLabel.setText("GE Slots: " + slots);
+            gphrLabel.setText("GP/hr: " + gpPerHour);
+
+            currentActions = actions;
 
             if (current != null)
             {
                 AsyncBufferedImage image = itemManager.getImage(current.itemId, 1, false);
-                image.addTo(iconLabel);
-                suggestionLabel.setText(current.name + " (ROI " + String.format("%.2f%%", current.roiPct) + ")");
+                image.addTo(currentIconLabel);
+                currentTitleLabel.setText(current.name);
+                currentMetaLabel.setText(String.format("Buy %,d | Sell %,d | ROI %.2f%% | Vol %,d", current.buyPrice, current.sellPrice, current.roiPct, current.minVolume));
             }
             else
             {
-                iconLabel.setIcon(null);
-                suggestionLabel.setText("No suggestion");
+                currentIconLabel.setIcon(null);
+                currentTitleLabel.setText("No recommendation yet");
+                currentMetaLabel.setText("Waiting for a valid API suggestion");
             }
 
-            listPanel.removeAll();
+            listContainer.removeAll();
             if (top == null || top.isEmpty())
             {
-                listPanel.add(new JLabel("No valid suggestions"));
+                JLabel empty = new JLabel("No valid suggestions available", SwingConstants.CENTER);
+                empty.setForeground(new Color(188, 196, 206));
+                listContainer.add(empty);
             }
             else
             {
-                int max = Math.min(5, top.size());
-                for (int i = 0; i < max; i++)
+                int count = Math.min(7, top.size());
+                for (int i = 0; i < count; i++)
                 {
-                    Flipper0Plugin.Suggestion s = top.get(i);
-                    listPanel.add(buildSuggestionRow(s, i == 0, actions));
-                    listPanel.add(Box.createRigidArea(new Dimension(0, 5)));
+                    listContainer.add(buildSuggestionRow(top.get(i), i + 1));
+                    listContainer.add(Box.createRigidArea(new Dimension(0, 6)));
                 }
             }
-            listPanel.revalidate();
-            listPanel.repaint();
+
+            listContainer.revalidate();
+            listContainer.repaint();
         });
     }
 
-    private JPanel buildSuggestionRow(Flipper0Plugin.Suggestion s, boolean actionable, Actions actions)
+    private JPanel buildSuggestionRow(Flipper0Plugin.Suggestion s, int rank)
     {
-        JPanel row = new JPanel(new BorderLayout(6, 0));
-        row.setBackground(ColorScheme.DARKER_GRAY_COLOR);
-        row.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createLineBorder(ColorScheme.MEDIUM_GRAY_COLOR),
-                new EmptyBorder(6, 6, 6, 6)));
+        JPanel row = card(new BorderLayout(8, 0));
 
-        JLabel item = new JLabel(s.name + " | buy " + s.buyPrice + " sell " + s.sellPrice + " | vol " + s.minVolume);
-        item.setFont(FontManager.getRunescapeSmallFont());
-        row.add(item, BorderLayout.CENTER);
+        JLabel icon = new JLabel();
+        AsyncBufferedImage image = itemManager.getImage(s.itemId, 1, false);
+        image.addTo(icon);
+        row.add(icon, BorderLayout.WEST);
 
-        if (actionable)
-        {
-            JPanel buttons = new JPanel();
-            buttons.setBackground(ColorScheme.DARKER_GRAY_COLOR);
-            JButton skip = new JButton("Skip");
-            skip.addActionListener(e -> actions.skipCurrent());
-            JButton blacklist = new JButton("Blacklist");
-            blacklist.addActionListener(e -> actions.blacklistCurrent());
-            buttons.add(skip);
-            buttons.add(blacklist);
-            row.add(buttons, BorderLayout.EAST);
-        }
+        JPanel text = new JPanel();
+        text.setOpaque(false);
+        text.setLayout(new BoxLayout(text, BoxLayout.Y_AXIS));
+
+        JLabel title = new JLabel("#" + rank + " " + s.name);
+        title.setForeground(Color.WHITE);
+        title.setFont(FontManager.getRunescapeBoldFont());
+
+        JLabel detail = new JLabel(String.format("Buy %,d | Sell %,d | ROI %.2f%% | Vol %,d", s.buyPrice, s.sellPrice, s.roiPct, s.minVolume));
+        detail.setForeground(new Color(188, 196, 206));
+        detail.setFont(FontManager.getRunescapeSmallFont());
+
+        text.add(title);
+        text.add(detail);
+        row.add(text, BorderLayout.CENTER);
+
         return row;
+    }
+
+    private JPanel card(BorderLayout layout)
+    {
+        JPanel panel = new JPanel(layout);
+        panel.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+        panel.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(new Color(70, 79, 90), 1, true),
+                new EmptyBorder(8, 8, 8, 8)));
+        return panel;
+    }
+
+    private void styleInfo(JLabel label)
+    {
+        label.setFont(FontManager.getRunescapeSmallFont());
+        label.setForeground(new Color(210, 216, 224));
     }
 }

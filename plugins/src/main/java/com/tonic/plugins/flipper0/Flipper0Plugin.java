@@ -5,10 +5,15 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.google.inject.Provides;
+import com.tonic.api.entities.NpcAPI;
+import com.tonic.api.game.ClientScriptAPI;
 import com.tonic.api.game.WorldsAPI;
+import com.tonic.api.threaded.Delays;
 import com.tonic.api.widgets.GrandExchangeAPI;
 import com.tonic.api.widgets.InventoryAPI;
 import com.tonic.data.wrappers.ItemEx;
+import com.tonic.data.wrappers.NpcEx;
+import com.tonic.queries.NpcQuery;
 import com.tonic.util.VitaPlugin;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
@@ -20,6 +25,7 @@ import net.runelite.client.config.ConfigManager;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
+import net.runelite.client.ui.overlay.OverlayManager;
 import net.runelite.client.util.ImageUtil;
 
 import javax.inject.Inject;
@@ -29,6 +35,7 @@ import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -64,6 +71,8 @@ public class Flipper0Plugin extends VitaPlugin
     @Inject private Flipper0Config config;
     @Inject private Client client;
     @Inject private Flipper0Panel panel;
+    @Inject private Flipper0Overlay overlay;
+    @Inject private OverlayManager overlayManager;
     @Inject private ClientToolbar clientToolbar;
 
     private NavigationButton navButton;
@@ -72,9 +81,14 @@ public class Flipper0Plugin extends VitaPlugin
     private final Set<Integer> runtimeBlacklist = new HashSet<>();
     private final List<Suggestion> suggestions = new ArrayList<>();
 
+    private Instant startedAt = Instant.EPOCH;
     private Instant lastFetch = Instant.EPOCH;
     private int skipCount;
-    private int lastSuggestedItem = -1;
+    private long realizedProfit;
+
+    private Suggestion currentSuggestion;
+    private Suggestion nextSuggestion;
+
     private String statusText = "Idle";
     private String slotsText = "0/0";
     private String coinsText = "0";
@@ -90,10 +104,15 @@ public class Flipper0Plugin extends VitaPlugin
     {
         runtimeBlacklist.clear();
         suggestions.clear();
+        activeOfferSince.clear();
+        startedAt = Instant.now();
         lastFetch = Instant.EPOCH;
         skipCount = 0;
-        lastSuggestedItem = -1;
+        realizedProfit = 0;
+        currentSuggestion = null;
+        nextSuggestion = null;
 
+        overlayManager.add(overlay);
         BufferedImage icon = ImageUtil.loadImageResource(getClass(), "/graph.png");
         navButton = NavigationButton.builder().tooltip("Flipper0").icon(icon).panel(panel).build();
         clientToolbar.addNavigation(navButton);
@@ -102,13 +121,14 @@ public class Flipper0Plugin extends VitaPlugin
     @Override
     protected void shutDown()
     {
+        overlayManager.remove(overlay);
         if (navButton != null)
         {
             clientToolbar.removeNavigation(navButton);
             navButton = null;
         }
         statusText = "Stopped";
-        refreshPanel(null);
+        refreshPanel();
     }
 
     @Override
@@ -117,29 +137,41 @@ public class Flipper0Plugin extends VitaPlugin
         if (!config.enabled() || client.getGameState() != GameState.LOGGED_IN || client.getLocalPlayer() == null)
         {
             statusText = "Disabled / not logged in";
-            refreshPanel(null);
+            refreshPanel();
             return;
         }
 
+        runtimeBlacklist.clear();
         runtimeBlacklist.addAll(parseCsv(config.blacklistItemIds()));
         updateSlotsText();
-        coinsText = String.valueOf(coinsOnHand());
+        coinsText = String.format("%,d", coinsOnHand());
 
-        if (Instant.now().isAfter(lastFetch.plusSeconds(15)))
-        {
-            suggestions.clear();
-            suggestions.addAll(fetchSuggestions());
-            lastFetch = Instant.now();
-        }
-
+        refreshSuggestionsIfNeeded();
         cancelStaleOffers();
         collectOffers();
 
-        Suggestion best = selectSuggestion();
-        refreshPanel(best);
-        if (best == null)
+        List<Suggestion> filtered = filteredSuggestions();
+        currentSuggestion = pickCurrent(filtered);
+        nextSuggestion = filtered.size() > 1 ? filtered.get(1) : null;
+
+        if (currentSuggestion == null)
         {
-            statusText = "No valid suggestions";
+            statusText = suggestions.isEmpty() ? "No API suggestions" : "No eligible suggestions";
+            refreshPanel();
+            Delays.tick(1);
+            return;
+        }
+
+        if (!GrandExchangeAPI.isOpen())
+        {
+            statusText = "Opening GE";
+            if (config.autoOpenGe())
+            {
+                openGrandExchange();
+                Delays.wait(90);
+            }
+            refreshPanel();
+            Delays.tick(1);
             return;
         }
 
@@ -147,70 +179,52 @@ public class Flipper0Plugin extends VitaPlugin
         if (freeSlots <= 0)
         {
             statusText = "No free GE slots";
+            refreshPanel();
+            Delays.tick(1);
             return;
         }
 
-        if (!GrandExchangeAPI.isOpen())
+        boolean sold = trySellHeldInventory(currentSuggestion);
+        boolean bought = tryBuySuggestion(currentSuggestion);
+
+        if (!sold && !bought)
         {
-            statusText = "Open GE to trade";
-            return;
+            statusText = "Monitoring offers / awaiting fills";
         }
 
-        processSellFirst(best);
-        placeBuyIfPossible(best);
+        refreshPanel();
+        Delays.tick(Math.max(1, config.loopDelayTicks()));
     }
 
-    private void processSellFirst(Suggestion best)
+    private void refreshSuggestionsIfNeeded()
     {
-        int qty = inventoryAmount(best.itemId);
-        if (qty <= 0 || hasActiveOffer(best.itemId))
+        if (Instant.now().isBefore(lastFetch.plusSeconds(Math.max(5, config.refreshSeconds()))))
         {
             return;
         }
 
-        int sellPrice = Math.max(best.buyPrice + 1, best.sellPrice);
-        boolean ok = GrandExchangeAPI.startSellOffer(best.itemId, qty, sellPrice) != null;
-        statusText = ok ? "Placed sell for " + best.name : "Sell failed for " + best.name;
-        if (ok)
+        List<Suggestion> fresh = fetchSuggestions();
+        if (!fresh.isEmpty())
         {
-            activeOfferSince.put(best.itemId, Instant.now());
+            suggestions.clear();
+            suggestions.addAll(fresh);
+            skipCount = 0;
+            statusText = "Loaded " + fresh.size() + " suggestions";
         }
+        else if (suggestions.isEmpty())
+        {
+            statusText = "Suggestion API returned no items";
+        }
+
+        lastFetch = Instant.now();
     }
 
-    private void placeBuyIfPossible(Suggestion best)
+    private List<Suggestion> filteredSuggestions()
     {
-        if (hasActiveOffer(best.itemId) || inventoryAmount(best.itemId) > 0)
-        {
-            return;
-        }
-
-        int spendable = Math.max(0, coinsOnHand() - config.coinReserve());
-        int budget = Math.min(config.maxGpPerTrade(), spendable);
-        int qty = Math.min(best.geLimit, budget / Math.max(1, best.buyPrice));
-        if (qty <= 0)
-        {
-            statusText = "Not enough coins for " + best.name;
-            return;
-        }
-
-        boolean ok = GrandExchangeAPI.startBuyOffer(best.itemId, qty, best.buyPrice) != null;
-        statusText = ok ? "Placed buy for " + best.name : "Buy failed for " + best.name;
-        if (ok)
-        {
-            activeOfferSince.put(best.itemId, Instant.now());
-            lastSuggestedItem = best.itemId;
-        }
-    }
-
-    private Suggestion selectSuggestion()
-    {
-        if (suggestions.isEmpty())
-        {
-            return null;
-        }
-
         int spendable = Math.max(0, coinsOnHand() - config.coinReserve());
         boolean memberWorld = WorldsAPI.inMembersWorld();
+        int maxTradeBudget = Math.max(1, config.maxGpPerTrade());
+        int minVolume = Math.max(1, config.minVolume());
 
         List<Suggestion> filtered = new ArrayList<>();
         for (Suggestion s : suggestions)
@@ -223,7 +237,7 @@ public class Flipper0Plugin extends VitaPlugin
             {
                 continue;
             }
-            if (s.minVolume < config.minVolume())
+            if (s.minVolume < minVolume)
             {
                 continue;
             }
@@ -235,28 +249,93 @@ public class Flipper0Plugin extends VitaPlugin
             {
                 continue;
             }
-            if (s.buyPrice > spendable || s.buyPrice > config.maxGpPerTrade())
-            {
-                continue;
-            }
             if (!isTradeableForAccount(s.itemId, memberWorld))
             {
                 continue;
             }
+
+            int effectiveBudget = Math.min(spendable, maxTradeBudget);
+            if (effectiveBudget < s.buyPrice)
+            {
+                continue;
+            }
+
             filtered.add(s);
         }
 
         filtered.sort(Comparator.comparingDouble((Suggestion s) -> s.score).reversed()
-                .thenComparingInt(s -> s.minVolume)
-                .thenComparingDouble(s -> s.roiPct));
+                .thenComparingDouble((Suggestion s) -> s.roiPct).reversed()
+                .thenComparingInt((Suggestion s) -> s.minVolume).reversed());
 
+        return filtered;
+    }
+
+    private Suggestion pickCurrent(List<Suggestion> filtered)
+    {
         if (filtered.isEmpty())
         {
             return null;
         }
 
-        int idx = Math.min(skipCount, filtered.size() - 1);
+        int idx = Math.min(Math.max(0, skipCount), filtered.size() - 1);
         return filtered.get(idx);
+    }
+
+    private boolean trySellHeldInventory(Suggestion suggestion)
+    {
+        int qty = inventoryAmount(suggestion.itemId);
+        if (qty <= 0 || hasActiveOffer(suggestion.itemId))
+        {
+            return false;
+        }
+
+        int price = Math.max(suggestion.buyPrice + 1, suggestion.sellPrice);
+        clearNumericDialogue();
+        boolean ok = GrandExchangeAPI.startSellOffer(suggestion.itemId, qty, price) != null;
+        clearNumericDialogue();
+
+        if (ok)
+        {
+            activeOfferSince.put(suggestion.itemId, Instant.now());
+            long estimated = (long) qty * (price - suggestion.buyPrice);
+            realizedProfit += Math.max(0, estimated);
+            statusText = "Placed sell for " + suggestion.name;
+            return true;
+        }
+
+        statusText = "Sell failed for " + suggestion.name;
+        return false;
+    }
+
+    private boolean tryBuySuggestion(Suggestion suggestion)
+    {
+        if (hasActiveOffer(suggestion.itemId) || inventoryAmount(suggestion.itemId) > 0)
+        {
+            return false;
+        }
+
+        int spendable = Math.max(0, coinsOnHand() - config.coinReserve());
+        int budget = Math.min(Math.max(1, config.maxGpPerTrade()), spendable);
+        int qty = Math.min(Math.max(1, suggestion.geLimit), budget / Math.max(1, suggestion.buyPrice));
+        if (qty <= 0)
+        {
+            statusText = "Not enough coins for " + suggestion.name;
+            return false;
+        }
+
+        clearNumericDialogue();
+        boolean ok = GrandExchangeAPI.startBuyOffer(suggestion.itemId, qty, suggestion.buyPrice) != null;
+        clearNumericDialogue();
+
+        if (ok)
+        {
+            activeOfferSince.put(suggestion.itemId, Instant.now());
+            statusText = "Placed buy for " + suggestion.name + " x" + qty;
+            return true;
+        }
+
+        statusText = "Buy failed for " + suggestion.name;
+        return false;
     }
 
     private boolean isTradeableForAccount(int itemId, boolean memberWorld)
@@ -276,22 +355,27 @@ public class Flipper0Plugin extends VitaPlugin
     private void cancelStaleOffers()
     {
         Instant now = Instant.now();
+        int timeout = Math.max(25, config.staleOfferSeconds());
+
         for (GrandExchangeOffer offer : GrandExchangeAPI.getOffers())
         {
             if (offer == null || offer.getItemId() <= 0)
             {
                 continue;
             }
+
             if (!isActiveState(offer.getState()))
             {
                 activeOfferSince.remove(offer.getItemId());
                 continue;
             }
+
             activeOfferSince.putIfAbsent(offer.getItemId(), now);
             Instant started = activeOfferSince.get(offer.getItemId());
-            if (started != null && now.isAfter(started.plusSeconds(config.staleOfferSeconds())))
+            if (started != null && Duration.between(started, now).getSeconds() >= timeout)
             {
                 GrandExchangeAPI.abortOffer(offer.getItemId());
+                clearNumericDialogue();
                 activeOfferSince.put(offer.getItemId(), now);
                 statusText = "Cancelled stale offer " + offer.getItemId();
             }
@@ -304,9 +388,29 @@ public class Flipper0Plugin extends VitaPlugin
         {
             return;
         }
+
         for (int i = 0; i < 2 && GrandExchangeAPI.canCollect(); i++)
         {
             GrandExchangeAPI.collectAll();
+            Delays.wait(20);
+        }
+    }
+
+    private void clearNumericDialogue()
+    {
+        for (int i = 0; i < 2; i++)
+        {
+            ClientScriptAPI.closeNumericInputDialogue();
+            Delays.wait(15);
+        }
+    }
+
+    private void openGrandExchange()
+    {
+        NpcEx clerk = new NpcQuery().withNameContains("Grand Exchange Clerk").sortNearest().first();
+        if (clerk != null)
+        {
+            NpcAPI.interact(clerk, "Exchange", "Talk-to", "Bank");
         }
     }
 
@@ -381,8 +485,8 @@ public class Flipper0Plugin extends VitaPlugin
             URL url = new URL(SUGGESTIONS_ENDPOINT);
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("GET");
-            conn.setConnectTimeout(2500);
-            conn.setReadTimeout(4500);
+            conn.setConnectTimeout(3000);
+            conn.setReadTimeout(6000);
 
             int code = conn.getResponseCode();
             if (code < 200 || code >= 300)
@@ -402,10 +506,10 @@ public class Flipper0Plugin extends VitaPlugin
             }
 
             JsonElement root = JsonParser.parseString(sb.toString());
-            JsonArray arr = toArray(root);
+            JsonArray arr = findSuggestionArray(root);
             if (arr == null)
             {
-                statusText = "API payload invalid";
+                statusText = "API payload missing suggestions";
                 return out;
             }
 
@@ -415,13 +519,13 @@ public class Flipper0Plugin extends VitaPlugin
                 {
                     continue;
                 }
+
                 Suggestion s = parseSuggestion(element.getAsJsonObject());
                 if (s != null)
                 {
                     out.add(s);
                 }
             }
-            statusText = "Loaded " + out.size() + " suggestions";
             return out;
         }
         catch (Exception ex)
@@ -431,7 +535,7 @@ public class Flipper0Plugin extends VitaPlugin
         }
     }
 
-    private JsonArray toArray(JsonElement root)
+    private JsonArray findSuggestionArray(JsonElement root)
     {
         if (root == null || root.isJsonNull())
         {
@@ -441,17 +545,23 @@ public class Flipper0Plugin extends VitaPlugin
         {
             return root.getAsJsonArray();
         }
-        if (root.isJsonObject())
+        if (!root.isJsonObject())
         {
-            JsonObject obj = root.getAsJsonObject();
-            if (obj.has("suggestions") && obj.get("suggestions").isJsonArray())
-            {
-                return obj.getAsJsonArray("suggestions");
-            }
-            if (obj.has("data") && obj.get("data").isJsonArray())
-            {
-                return obj.getAsJsonArray("data");
-            }
+            return null;
+        }
+
+        JsonObject obj = root.getAsJsonObject();
+        if (obj.has("suggestions") && obj.get("suggestions").isJsonArray())
+        {
+            return obj.getAsJsonArray("suggestions");
+        }
+        if (obj.has("data") && obj.get("data").isJsonArray())
+        {
+            return obj.getAsJsonArray("data");
+        }
+        if (obj.has("items") && obj.get("items").isJsonArray())
+        {
+            return obj.getAsJsonArray("items");
         }
         return null;
     }
@@ -459,7 +569,7 @@ public class Flipper0Plugin extends VitaPlugin
     private Suggestion parseSuggestion(JsonObject obj)
     {
         Suggestion s = new Suggestion();
-        s.itemId = getInt(obj, "itemId", getInt(obj, "id", -1));
+        s.itemId = getInt(obj, "itemId", getInt(obj, "id", getInt(obj, "item_id", -1)));
         if (s.itemId <= 0)
         {
             return null;
@@ -468,23 +578,23 @@ public class Flipper0Plugin extends VitaPlugin
         ItemComposition def = client.getItemDefinition(s.itemId);
         s.name = getString(obj, "name", def != null ? def.getName() : ("Item " + s.itemId));
 
-        s.buyPrice = getInt(obj, "buyPrice", getInt(obj, "buy", getInt(obj, "low", -1)));
-        s.sellPrice = getInt(obj, "sellPrice", getInt(obj, "sell", getInt(obj, "high", -1)));
-        s.minVolume = getInt(obj, "minVolume", getInt(obj, "volume", 0));
-        s.geLimit = Math.max(1, getInt(obj, "geLimit", 70));
+        s.buyPrice = getInt(obj, "buyPrice", getInt(obj, "buy", getInt(obj, "buy_price", getInt(obj, "low", -1))));
+        s.sellPrice = getInt(obj, "sellPrice", getInt(obj, "sell", getInt(obj, "sell_price", getInt(obj, "high", -1))));
+        s.minVolume = getInt(obj, "minVolume", getInt(obj, "volume", getInt(obj, "volume_5m", 0)));
+        s.geLimit = Math.max(1, getInt(obj, "geLimit", getInt(obj, "limit", 70)));
         s.members = getBoolean(obj, "members", def != null && def.isMembers());
-        s.score = getDouble(obj, "score", 0.0);
-        s.ts = getLong(obj, "timestamp", getLong(obj, "ts", Instant.now().getEpochSecond()));
+        s.score = getDouble(obj, "score", getDouble(obj, "rankScore", 0.0));
+        s.ts = getLong(obj, "timestamp", getLong(obj, "ts", getLong(obj, "updatedAt", Instant.now().getEpochSecond())));
 
         if (s.buyPrice <= 0 || s.sellPrice <= s.buyPrice)
         {
             return null;
         }
 
-        s.roiPct = ((s.sellPrice - s.buyPrice) * 100.0) / s.buyPrice;
+        s.roiPct = ((s.sellPrice - s.buyPrice) * 100.0) / Math.max(1, s.buyPrice);
         if (s.score == 0.0)
         {
-            s.score = s.roiPct + (Math.log10(Math.max(1, s.minVolume)) * 2.0);
+            s.score = s.roiPct + (Math.log10(Math.max(1, s.minVolume)) * 1.8);
         }
         return s;
     }
@@ -540,28 +650,51 @@ public class Flipper0Plugin extends VitaPlugin
         return set;
     }
 
-    private void refreshPanel(Suggestion current)
+    private void refreshPanel()
     {
-        panel.refresh(statusText, coinsText, slotsText, current, suggestions, new Flipper0Panel.Actions()
-        {
-            @Override
-            public void skipCurrent()
-            {
-                skipCount++;
-            }
-
-            @Override
-            public void blacklistCurrent()
-            {
-                if (current != null)
+        panel.refresh(
+                statusText,
+                coinsText,
+                slotsText,
+                getGpPerHourText(),
+                currentSuggestion,
+                new ArrayList<>(filteredSuggestions()),
+                new Flipper0Panel.Actions()
                 {
-                    runtimeBlacklist.add(current.itemId);
-                    if (current.itemId == lastSuggestedItem)
+                    @Override
+                    public void skipCurrent()
                     {
-                        lastSuggestedItem = -1;
+                        skipCount++;
+                    }
+
+                    @Override
+                    public void blacklistCurrent()
+                    {
+                        if (currentSuggestion != null)
+                        {
+                            runtimeBlacklist.add(currentSuggestion.itemId);
+                            skipCount = 0;
+                        }
                     }
                 }
-            }
-        });
+        );
+    }
+
+    public boolean shouldRenderOverlay()
+    {
+        return config.enabled() && client.getGameState() == GameState.LOGGED_IN;
+    }
+
+    public String getStatusText() { return statusText; }
+    public String getSlotsText() { return slotsText; }
+    public String getCoinsText() { return coinsText; }
+    public Suggestion getCurrentSuggestion() { return currentSuggestion; }
+    public Suggestion getNextSuggestion() { return nextSuggestion; }
+
+    public String getGpPerHourText()
+    {
+        long secs = Math.max(1, Duration.between(startedAt, Instant.now()).getSeconds());
+        long gphr = (realizedProfit * 3600L) / secs;
+        return String.format("%,d", gphr);
     }
 }
