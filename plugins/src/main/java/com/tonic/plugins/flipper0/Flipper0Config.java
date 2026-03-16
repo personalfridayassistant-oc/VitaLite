@@ -14,7 +14,7 @@ public interface Flipper0Config extends Config
     default boolean autoOpenGe() { return true; }
 
     @ConfigItem(keyName = "refreshSeconds", name = "Suggestion refresh (sec)", description = "How often to fetch new suggestions", position = 2)
-    default int refreshSeconds() { return 12; }
+    default int refreshSeconds() { return 5; }
 
     @ConfigItem(keyName = "coinReserve", name = "Coin reserve", description = "Keep this many coins unspent", position = 3)
     default int coinReserve() { return 250_000; }
@@ -26,7 +26,7 @@ public interface Flipper0Config extends Config
     default int minVolume() { return 25; }
 
     @ConfigItem(keyName = "maxDataAgeSeconds", name = "Max suggestion age (seconds)", description = "Ignore stale suggestions", position = 6)
-    default int maxDataAgeSeconds() { return 600; }
+    default int maxDataAgeSeconds() { return 240; }
 
     @ConfigItem(keyName = "staleOfferSeconds", name = "Cancel stale offers (seconds)", description = "Cancel offers older than this", position = 7)
     default int staleOfferSeconds() { return 90; }
