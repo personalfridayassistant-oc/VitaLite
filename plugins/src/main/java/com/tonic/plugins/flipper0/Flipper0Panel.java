@@ -19,6 +19,7 @@ import javax.swing.SwingUtilities;
 import javax.swing.border.EmptyBorder;
 import java.awt.BorderLayout;
 import java.awt.Color;
+import java.awt.Component;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.GridLayout;
@@ -89,6 +90,12 @@ public class Flipper0Panel extends PluginPanel
         styleInfo(gphrLabel);
         styleInfo(apiLabel);
         styleInfo(debugLabel);
+        centerLabel(statusLabel);
+        centerLabel(coinsLabel);
+        centerLabel(slotsLabel);
+        centerLabel(gphrLabel);
+        centerLabel(apiLabel);
+        centerLabel(debugLabel);
         stats.add(statusLabel);
         stats.add(coinsLabel);
         stats.add(slotsLabel);
@@ -98,7 +105,8 @@ public class Flipper0Panel extends PluginPanel
 
         JPanel current = new JPanel(new BorderLayout(8, 0));
         current.setOpaque(false);
-        currentIconLabel.setPreferredSize(new Dimension(38, 38));
+        currentIconLabel.setPreferredSize(new Dimension(44, 44));
+        currentIconLabel.setHorizontalAlignment(SwingConstants.CENTER);
         current.add(currentIconLabel, BorderLayout.WEST);
 
         JPanel text = new JPanel();
@@ -106,13 +114,16 @@ public class Flipper0Panel extends PluginPanel
         text.setLayout(new BoxLayout(text, BoxLayout.Y_AXIS));
         currentTitleLabel.setFont(FontManager.getRunescapeBoldFont());
         currentTitleLabel.setForeground(Color.WHITE);
+        currentTitleLabel.setHorizontalAlignment(SwingConstants.CENTER);
         currentMetaLabel.setFont(FontManager.getRunescapeSmallFont());
         currentMetaLabel.setForeground(new Color(188, 196, 206));
+        currentMetaLabel.setHorizontalAlignment(SwingConstants.CENTER);
         text.add(currentTitleLabel);
         text.add(currentMetaLabel);
+        text.setAlignmentX(Component.CENTER_ALIGNMENT);
         current.add(text, BorderLayout.CENTER);
 
-        JPanel actions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
+        JPanel actions = new JPanel(new FlowLayout(FlowLayout.CENTER, 8, 0));
         actions.setOpaque(false);
         skipButton.setFocusable(false);
         blacklistButton.setFocusable(false);
@@ -158,7 +169,10 @@ public class Flipper0Panel extends PluginPanel
             {
                 JLabel empty = new JLabel("No valid suggestions available", SwingConstants.CENTER);
                 empty.setForeground(new Color(188, 196, 206));
+                empty.setAlignmentX(Component.CENTER_ALIGNMENT);
+                listContainer.add(Box.createVerticalGlue());
                 listContainer.add(empty);
+                listContainer.add(Box.createVerticalGlue());
             }
             else
             {
@@ -178,6 +192,7 @@ public class Flipper0Panel extends PluginPanel
     private JPanel buildSuggestionRow(Flipper0Plugin.Suggestion s, int rank)
     {
         JPanel row = card(new BorderLayout(8, 0));
+        row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 86));
 
         JLabel icon = new JLabel();
         AsyncBufferedImage image = itemManager.getImage(s.itemId, 1, false);
@@ -188,14 +203,16 @@ public class Flipper0Panel extends PluginPanel
         text.setOpaque(false);
         text.setLayout(new BoxLayout(text, BoxLayout.Y_AXIS));
 
-        JLabel title = new JLabel("#" + rank + " " + s.name);
+        JLabel title = new JLabel("#" + rank + " " + s.name, SwingConstants.CENTER);
         title.setForeground(Color.WHITE);
         title.setFont(FontManager.getRunescapeBoldFont());
 
-        JLabel detail = new JLabel(String.format("Buy %,d | Sell %,d | ROI %.2f%% | Vol %,d", s.buyPrice, s.sellPrice, s.roiPct, s.minVolume));
+        JLabel detail = new JLabel(String.format("Buy %,d | Sell %,d | ROI %.2f%% | Vol %,d", s.buyPrice, s.sellPrice, s.roiPct, s.minVolume), SwingConstants.CENTER);
         detail.setForeground(new Color(188, 196, 206));
         detail.setFont(FontManager.getRunescapeSmallFont());
 
+        title.setAlignmentX(Component.CENTER_ALIGNMENT);
+        detail.setAlignmentX(Component.CENTER_ALIGNMENT);
         text.add(title);
         text.add(detail);
         row.add(text, BorderLayout.CENTER);
@@ -206,10 +223,10 @@ public class Flipper0Panel extends PluginPanel
     private JPanel card(BorderLayout layout)
     {
         JPanel panel = new JPanel(layout);
-        panel.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+        panel.setBackground(new Color(38, 43, 51));
         panel.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createLineBorder(new Color(70, 79, 90), 1, true),
-                new EmptyBorder(8, 8, 8, 8)));
+                BorderFactory.createLineBorder(new Color(86, 97, 112), 1, true),
+                new EmptyBorder(10, 10, 10, 10)));
         return panel;
     }
 
@@ -217,5 +234,11 @@ public class Flipper0Panel extends PluginPanel
     {
         label.setFont(FontManager.getRunescapeSmallFont());
         label.setForeground(new Color(210, 216, 224));
+    }
+
+    private void centerLabel(JLabel label)
+    {
+        label.setHorizontalAlignment(SwingConstants.CENTER);
+        label.setAlignmentX(Component.CENTER_ALIGNMENT);
     }
 }

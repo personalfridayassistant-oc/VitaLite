@@ -57,11 +57,12 @@ public class Flipper0Plugin extends VitaPlugin
     private static final Logger log = LoggerFactory.getLogger(Flipper0Plugin.class);
 
     private static final String[] SUGGESTION_ENDPOINTS = {
-            "http://192.168.1.27:3015/api/v1/suggestions/runelite?limit=1000",
-            "http://192.168.1.27:3015/api/v1/suggestions?limit=100",
-            "http://192.168.1.27/api/v1/suggestions/runelite?limit=25"
+            "http://192.168.1.27:3015/api/v1/suggestions/runelite?limit=200",
+            "http://192.168.1.27:3015/api/v1/suggestions?limit=200",
+            "http://192.168.1.27/api/v1/suggestions/runelite?limit=200"
     };
     private static final String HEALTH_ENDPOINT = "http://192.168.1.27:3015/api/v1/health";
+    private static final int MAX_REDIRECTS = 3;
 
     static class Suggestion
     {
@@ -590,7 +591,7 @@ public class Flipper0Plugin extends VitaPlugin
 
         for (String endpoint : SUGGESTION_ENDPOINTS)
         {
-            List<Suggestion> parsed = fetchSuggestionsFromEndpoint(endpoint, endpointDebug);
+            List<Suggestion> parsed = fetchSuggestionsFromEndpoint(endpoint, endpointDebug, 0);
             if (!parsed.isEmpty())
             {
                 out.addAll(parsed);
@@ -608,19 +609,40 @@ public class Flipper0Plugin extends VitaPlugin
         return out;
     }
 
-    private List<Suggestion> fetchSuggestionsFromEndpoint(String endpoint, List<String> endpointDebug)
+    private List<Suggestion> fetchSuggestionsFromEndpoint(String endpoint, List<String> endpointDebug, int redirectDepth)
     {
         List<Suggestion> out = new ArrayList<>();
         try
         {
             URL url = new URL(endpoint);
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn.setInstanceFollowRedirects(false);
             conn.setRequestMethod("GET");
             conn.setRequestProperty("Accept", "application/json");
             conn.setConnectTimeout(3000);
             conn.setReadTimeout(6000);
 
             int code = conn.getResponseCode();
+            if (code >= 300 && code < 400)
+            {
+                String location = conn.getHeaderField("Location");
+                if (location == null || location.trim().isEmpty())
+                {
+                    endpointDebug.add(endpoint + " -> HTTP " + code + " (redirect with no location)");
+                    return out;
+                }
+
+                if (redirectDepth >= MAX_REDIRECTS)
+                {
+                    endpointDebug.add(endpoint + " -> HTTP " + code + " (redirect limit reached)");
+                    return out;
+                }
+
+                String resolved = new URL(url, location).toExternalForm();
+                endpointDebug.add(endpoint + " -> HTTP " + code + " redirect to " + resolved);
+                return fetchSuggestionsFromEndpoint(resolved, endpointDebug, redirectDepth + 1);
+            }
+
             if (code < 200 || code >= 300)
             {
                 endpointDebug.add(endpoint + " -> HTTP " + code);
