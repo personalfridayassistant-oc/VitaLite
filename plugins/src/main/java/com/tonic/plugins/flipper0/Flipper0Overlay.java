@@ -36,7 +36,7 @@ public class Flipper0Overlay extends Overlay
         }
 
         int width = 250;
-        int height = 182;
+        int height = 198;
         int x = 10;
         int y = 310;
 
@@ -58,12 +58,14 @@ public class Flipper0Overlay extends Overlay
         graphics.drawString("GP/hr: " + plugin.getGpPerHourText(), x + 10, lineY);
         lineY += 16;
         graphics.drawString("Slots: " + plugin.getSlotsText(), x + 10, lineY);
+        lineY += 16;
+        graphics.drawString("API: " + plugin.getApiHealthText(), x + 10, lineY);
 
         Flipper0Plugin.Suggestion current = plugin.getCurrentSuggestion();
         Flipper0Plugin.Suggestion next = plugin.getNextSuggestion();
 
-        drawSuggestionBlock(graphics, x + 10, y + 86, "Current", current);
-        drawSuggestionBlock(graphics, x + 128, y + 86, "Next", next);
+        drawSuggestionBlock(graphics, x + 10, y + 102, "Current", current);
+        drawSuggestionBlock(graphics, x + 128, y + 102, "Next", next);
 
         return new Dimension(width, height);
     }

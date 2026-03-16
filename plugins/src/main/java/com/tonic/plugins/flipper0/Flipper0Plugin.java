@@ -53,9 +53,11 @@ import java.util.Set;
 public class Flipper0Plugin extends VitaPlugin
 {
     private static final String[] SUGGESTION_ENDPOINTS = {
+            "http://localhost:3015/api/v1/suggestions/runelite?limit=1000",
             "http://192.168.1.27:3015/api/v1/suggestions?limit=100",
             "http://192.168.1.27/api/v1/suggestions/runelite?limit=25"
     };
+    private static final String HEALTH_ENDPOINT = "http://192.168.1.27:3015/api/v1/health";
 
     static class Suggestion
     {
@@ -86,6 +88,7 @@ public class Flipper0Plugin extends VitaPlugin
 
     private Instant startedAt = Instant.EPOCH;
     private Instant lastFetch = Instant.EPOCH;
+    private Instant lastHealthCheck = Instant.EPOCH;
     private int skipCount;
     private long realizedProfit;
 
@@ -95,6 +98,8 @@ public class Flipper0Plugin extends VitaPlugin
     private String statusText = "Idle";
     private String slotsText = "0/0";
     private String coinsText = "0";
+    private String apiHealthText = "Unknown";
+    private boolean apiHealthy;
 
     @Provides
     Flipper0Config provideConfig(ConfigManager configManager)
@@ -114,6 +119,9 @@ public class Flipper0Plugin extends VitaPlugin
         realizedProfit = 0;
         currentSuggestion = null;
         nextSuggestion = null;
+        lastHealthCheck = Instant.EPOCH;
+        apiHealthy = false;
+        apiHealthText = "Unknown";
 
         overlayManager.add(overlay);
         BufferedImage icon = ImageUtil.loadImageResource(getClass(), "/graph.png");
@@ -149,6 +157,7 @@ public class Flipper0Plugin extends VitaPlugin
         updateSlotsText();
         coinsText = String.format("%,d", coinsOnHand());
 
+        refreshApiHealthIfNeeded();
         refreshSuggestionsIfNeeded();
         cancelStaleOffers();
         collectOffers();
@@ -217,8 +226,44 @@ public class Flipper0Plugin extends VitaPlugin
         {
             statusText = "Suggestion API returned no items";
         }
+        else
+        {
+            statusText = "Using cached suggestions (api empty)";
+        }
 
         lastFetch = Instant.now();
+    }
+
+
+    private void refreshApiHealthIfNeeded()
+    {
+        if (Instant.now().isBefore(lastHealthCheck.plusSeconds(60)))
+        {
+            return;
+        }
+
+        apiHealthy = isHealthEndpointUp();
+        apiHealthText = apiHealthy ? "Up" : "Down";
+        lastHealthCheck = Instant.now();
+    }
+
+    private boolean isHealthEndpointUp()
+    {
+        try
+        {
+            URL url = new URL(HEALTH_ENDPOINT);
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("GET");
+            conn.setRequestProperty("Accept", "application/json");
+            conn.setConnectTimeout(2000);
+            conn.setReadTimeout(3000);
+            int code = conn.getResponseCode();
+            return code >= 200 && code < 300;
+        }
+        catch (Exception ignored)
+        {
+            return false;
+        }
     }
 
     private List<Suggestion> filteredSuggestions()
@@ -563,6 +608,8 @@ public class Flipper0Plugin extends VitaPlugin
 
         JsonObject obj = element.getAsJsonObject();
         JsonObject itemObj = obj.has("item") && obj.get("item").isJsonObject() ? obj.getAsJsonObject("item") : obj;
+        JsonObject pricesObj = obj.has("prices") && obj.get("prices").isJsonObject() ? obj.getAsJsonObject("prices") : obj;
+        JsonObject metricsObj = obj.has("metrics") && obj.get("metrics").isJsonObject() ? obj.getAsJsonObject("metrics") : obj;
 
         Suggestion s = new Suggestion();
         s.itemId = getInt(itemObj, "itemId", getInt(itemObj, "id", getInt(itemObj, "item_id", -1)));
@@ -579,6 +626,9 @@ public class Flipper0Plugin extends VitaPlugin
                 getInt(obj, "highPrice", -1),
                 getInt(obj, "sellPrice", -1),
                 getInt(obj, "sell", -1),
+                getInt(pricesObj, "high", -1),
+                getInt(pricesObj, "sell", -1),
+                getInt(pricesObj, "sellPrice", -1),
                 getInt(itemObj, "high", -1)
         );
 
@@ -587,6 +637,9 @@ public class Flipper0Plugin extends VitaPlugin
                 getInt(obj, "lowPrice", -1),
                 getInt(obj, "buyPrice", -1),
                 getInt(obj, "buy", -1),
+                getInt(pricesObj, "low", -1),
+                getInt(pricesObj, "buy", -1),
+                getInt(pricesObj, "buyPrice", -1),
                 getInt(itemObj, "low", -1)
         );
 
@@ -597,6 +650,9 @@ public class Flipper0Plugin extends VitaPlugin
                 getInt(obj, "volume", -1),
                 getInt(obj, "volume_5m", -1),
                 getInt(obj, "fiveMinuteVolume", -1),
+                getInt(metricsObj, "minVolume", -1),
+                getInt(metricsObj, "volume", -1),
+                getInt(metricsObj, "volume_5m", -1),
                 getInt(itemObj, "volume", -1),
                 0
         );
@@ -614,6 +670,7 @@ public class Flipper0Plugin extends VitaPlugin
                 getDouble(obj, "score", -1),
                 getDouble(obj, "rankScore", -1),
                 getDouble(obj, "opportunityScore", -1),
+                getDouble(metricsObj, "score", -1),
                 0.0
         );
 
@@ -827,6 +884,7 @@ public class Flipper0Plugin extends VitaPlugin
 
     public String getStatusText() { return statusText; }
     public String getSlotsText() { return slotsText; }
+    public String getApiHealthText() { return apiHealthText; }
     public Suggestion getCurrentSuggestion() { return currentSuggestion; }
     public Suggestion getNextSuggestion() { return nextSuggestion; }
 
