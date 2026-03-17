@@ -225,13 +225,14 @@ public class ApiRequestHandler {
             suggestion = waitSuggestion;
         }
 
-        Suggestion finalSuggestion = suggestion;
-        if (finalSuggestion.isWaitSuggestion()) {
+        Suggestion resolvedSuggestion = suggestion;
+        if (resolvedSuggestion.isWaitSuggestion()) {
             Suggestion fallbackSell = buildFallbackSellSuggestionFromStatus(status);
             if (fallbackSell != null) {
-                finalSuggestion = fallbackSell;
+                resolvedSuggestion = fallbackSell;
             }
         }
+        final Suggestion finalSuggestion = resolvedSuggestion;
         clientThread.invoke(() -> suggestionConsumer.accept(finalSuggestion));
         Data d = new Data();
         d.loadingErrorMessage = "No graph data loaded for this item.";
