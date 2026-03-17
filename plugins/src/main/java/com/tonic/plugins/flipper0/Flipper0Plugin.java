@@ -63,6 +63,8 @@ public class Flipper0Plugin extends VitaPlugin
     };
     private static final String HEALTH_ENDPOINT = "http://192.168.1.27:3015/api/v1/health";
     private static final int MAX_REDIRECTS = 3;
+    private static final int BUY_ATTEMPT_INTERVAL_SECONDS = 8;
+    private static final int BUY_FAILURE_COOLDOWN_SECONDS = 15;
 
     static class Suggestion
     {
@@ -222,10 +224,10 @@ public class Flipper0Plugin extends VitaPlugin
             return;
         }
 
-        boolean sold = trySellHeldInventory(currentSuggestion);
+        boolean sold = trySellAnyHeldInventory(filtered, currentSuggestion);
 
         boolean bought = false;
-        if (getFreeEligibleSlots() > 0)
+        if (!sold && getFreeEligibleSlots() > 0)
         {
             if (Instant.now().isBefore(nextBuyAttemptAt))
             {
@@ -420,6 +422,41 @@ public class Flipper0Plugin extends VitaPlugin
         return false;
     }
 
+
+    private boolean trySellAnyHeldInventory(List<Suggestion> rankedSuggestions, Suggestion current)
+    {
+        if (current != null && trySellHeldInventory(current))
+        {
+            return true;
+        }
+
+        if (rankedSuggestions == null || rankedSuggestions.isEmpty())
+        {
+            return false;
+        }
+
+        Set<Integer> seen = new HashSet<>();
+        if (current != null)
+        {
+            seen.add(current.itemId);
+        }
+
+        for (Suggestion suggestion : rankedSuggestions)
+        {
+            if (suggestion == null || seen.contains(suggestion.itemId))
+            {
+                continue;
+            }
+            seen.add(suggestion.itemId);
+            if (trySellHeldInventory(suggestion))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private boolean tryBuySuggestion(Suggestion suggestion)
     {
         if (hasActiveOffer(suggestion.itemId) || inventoryAmount(suggestion.itemId) > 0)
@@ -427,12 +464,14 @@ public class Flipper0Plugin extends VitaPlugin
             return false;
         }
 
+        nextBuyAttemptAt = Instant.now().plusSeconds(BUY_ATTEMPT_INTERVAL_SECONDS);
+
         int spendable = Math.max(0, coinsOnHand() - config.coinReserve());
         int budget = Math.min(Math.max(1, config.maxGpPerTrade()), spendable);
         int qty = Math.min(Math.max(1, suggestion.geLimit), budget / Math.max(1, suggestion.buyPrice));
         if (qty <= 0)
         {
-            nextBuyAttemptAt = Instant.now().plusSeconds(3);
+            nextBuyAttemptAt = Instant.now().plusSeconds(BUY_ATTEMPT_INTERVAL_SECONDS);
             statusText = "Not enough coins for " + suggestion.name;
             return false;
         }
@@ -450,8 +489,8 @@ public class Flipper0Plugin extends VitaPlugin
             return true;
         }
 
-        nextBuyAttemptAt = Instant.now().plusSeconds(5);
-        statusText = "Buy failed for " + suggestion.name + " (cooldown 5s)";
+        nextBuyAttemptAt = Instant.now().plusSeconds(BUY_FAILURE_COOLDOWN_SECONDS);
+        statusText = "Buy failed for " + suggestion.name + " (cooldown " + BUY_FAILURE_COOLDOWN_SECONDS + "s)";
         log.warn("Failed placing buy offer item={} name={} qty={} price={}; backing off until {}", suggestion.itemId, suggestion.name, qty, suggestion.buyPrice, nextBuyAttemptAt);
         return false;
     }
@@ -463,7 +502,7 @@ public class Flipper0Plugin extends VitaPlugin
             ItemComposition def = client.getItemDefinition(itemId);
             if (def == null)
             {
-                return true;
+                return memberWorld;
             }
             if (!memberWorld && def.isMembers())
             {
@@ -473,8 +512,8 @@ public class Flipper0Plugin extends VitaPlugin
         }
         catch (IllegalStateException ex)
         {
-            log.debug("Skipping item-definition tradeability check off client thread for itemId={}", itemId);
-            return true;
+            log.debug("Skipping item-definition tradeability check off client thread for itemId={} memberWorld={}", itemId, memberWorld);
+            return memberWorld;
         }
         catch (Exception ex)
         {
