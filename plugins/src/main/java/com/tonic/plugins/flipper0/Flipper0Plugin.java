@@ -445,16 +445,29 @@ public class Flipper0Plugin extends VitaPlugin
 
     private boolean isTradeableForAccount(int itemId, boolean memberWorld)
     {
-        ItemComposition def = client.getItemDefinition(itemId);
-        if (def == null)
+        try
         {
+            ItemComposition def = client.getItemDefinition(itemId);
+            if (def == null)
+            {
+                return true;
+            }
+            if (!memberWorld && def.isMembers())
+            {
+                return false;
+            }
+            return def.isTradeable();
+        }
+        catch (IllegalStateException ex)
+        {
+            log.debug("Skipping item-definition tradeability check off client thread for itemId={}", itemId);
             return true;
         }
-        if (!memberWorld && def.isMembers())
+        catch (Exception ex)
         {
-            return false;
+            log.warn("Tradeability lookup failed for itemId={}: {}", itemId, ex.getMessage());
+            return true;
         }
-        return def.isTradeable();
     }
 
     private void cancelStaleOffers()
@@ -688,6 +701,7 @@ public class Flipper0Plugin extends VitaPlugin
         catch (Exception ex)
         {
             endpointDebug.add(endpoint + " -> " + ex.getClass().getSimpleName() + ": " + ex.getMessage());
+            log.warn("Suggestion fetch failed at endpoint {}: {}", endpoint, ex.toString());
             return out;
         }
     }
@@ -724,12 +738,11 @@ public class Flipper0Plugin extends VitaPlugin
             return null;
         }
 
-        ItemComposition def = client.getItemDefinition(s.itemId);
         s.name = getString(itemObj, "name",
                 getString(itemObj, "itemName",
                     getString(itemObj, "item_name",
                         getString(obj, "name",
-                            getString(obj, "itemName", def != null ? def.getName() : ("Item " + s.itemId))))));
+                            getString(obj, "itemName", "Item " + s.itemId)))));
 
         int high = pickPositive(
                 getInt(obj, "high", -1),
@@ -837,7 +850,7 @@ public class Flipper0Plugin extends VitaPlugin
                 70
         ));
 
-        boolean membersFromItem = getBoolean(itemObj, "members", def != null && def.isMembers());
+        boolean membersFromItem = getBoolean(itemObj, "members", false);
         s.members = getBoolean(obj, "members", membersFromItem);
 
         s.score = pickPositiveDouble(
