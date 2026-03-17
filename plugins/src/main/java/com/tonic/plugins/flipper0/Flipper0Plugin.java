@@ -820,6 +820,8 @@ public class Flipper0Plugin extends VitaPlugin
                 getInt(obj, "sellPrice", -1),
                 getInt(obj, "sell_price", -1),
                 getInt(obj, "sell", -1),
+                getInt(obj, "latestHigh", -1),
+                getInt(obj, "latest_high", -1),
                 getInt(obj, "targetSell", -1),
                 getInt(obj, "target_sell", -1),
                 getInt(pricesObj, "high", -1),
@@ -836,6 +838,8 @@ public class Flipper0Plugin extends VitaPlugin
                 getInt(obj, "buyPrice", -1),
                 getInt(obj, "buy_price", -1),
                 getInt(obj, "buy", -1),
+                getInt(obj, "latestLow", -1),
+                getInt(obj, "latest_low", -1),
                 getInt(obj, "targetBuy", -1),
                 getInt(obj, "target_buy", -1),
                 getInt(pricesObj, "low", -1),
@@ -851,6 +855,7 @@ public class Flipper0Plugin extends VitaPlugin
                 getInt(pricesObj, "buyPrice", -1),
                 getInt(pricesObj, "buy_price", -1),
                 getInt(pricesObj, "buy", -1),
+                getInt(obj, "latestLow", -1),
                 low
         );
 
@@ -860,6 +865,7 @@ public class Flipper0Plugin extends VitaPlugin
                 getInt(pricesObj, "sellPrice", -1),
                 getInt(pricesObj, "sell_price", -1),
                 getInt(pricesObj, "sell", -1),
+                getInt(obj, "latestHigh", -1),
                 high
         );
 
@@ -880,7 +886,9 @@ public class Flipper0Plugin extends VitaPlugin
                 getInt(obj, "marginGp", -1),
                 getInt(obj, "margin_gp", -1),
                 getInt(metricsObj, "margin", -1),
-                getInt(metricsObj, "marginGp", -1)
+                getInt(metricsObj, "marginGp", -1),
+                getInt(obj, "postTaxProfit", -1),
+                getInt(obj, "post_tax_profit", -1)
         );
         if (s.buyPrice > 0 && s.sellPrice > 0 && s.sellPrice <= s.buyPrice && margin > 0)
         {
@@ -897,6 +905,10 @@ public class Flipper0Plugin extends VitaPlugin
                 getInt(obj, "dailyVolume", -1),
                 getInt(obj, "volume1h", -1),
                 getInt(obj, "hourlyVolume", -1),
+                getInt(obj, "volHigh5m", -1),
+                getInt(obj, "volLow5m", -1),
+                getInt(obj, "volHigh1h", -1),
+                getInt(obj, "volLow1h", -1),
                 getInt(obj, "daily_volume", -1),
                 getInt(metricsObj, "minVolume", -1),
                 getInt(metricsObj, "volume", -1),
@@ -914,6 +926,7 @@ public class Flipper0Plugin extends VitaPlugin
                 getInt(itemObj, "limit", -1),
                 getInt(obj, "buyLimit", -1),
                 getInt(obj, "buy_limit", -1),
+                getInt(obj, "limit", -1),
                 getInt(obj, "geLimit", -1),
                 getInt(obj, "limit", -1),
                 70
@@ -956,7 +969,7 @@ public class Flipper0Plugin extends VitaPlugin
         s.roiPct = ((s.sellPrice - s.buyPrice) * 100.0) / Math.max(1, s.buyPrice);
         if (roiRaw > 0)
         {
-            s.roiPct = roiRaw <= 1.0 ? (roiRaw * 100.0) : roiRaw;
+            s.roiPct = roiRaw * 100.0;
         }
 
         if (s.score <= 0.0)
