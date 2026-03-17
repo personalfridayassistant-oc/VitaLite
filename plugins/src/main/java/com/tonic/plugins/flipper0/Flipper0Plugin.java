@@ -331,7 +331,7 @@ public class Flipper0Plugin extends VitaPlugin
                 stats.blacklisted++;
                 continue;
             }
-            if (s.minVolume < minVolume)
+            if (s.minVolume > 0 && s.minVolume < minVolume)
             {
                 stats.lowVolume++;
                 continue;
@@ -678,6 +678,10 @@ public class Flipper0Plugin extends VitaPlugin
             }
 
             endpointDebug.add(endpoint + " -> parsed " + out.size() + " valid suggestions from " + objects.size() + " records");
+            if (out.isEmpty())
+            {
+                log.warn("Endpoint {} returned {} records but none parsed into valid suggestions", endpoint, objects.size());
+            }
 
             return out;
         }
@@ -699,14 +703,33 @@ public class Flipper0Plugin extends VitaPlugin
         JsonObject metricsObj = obj.has("metrics") && obj.get("metrics").isJsonObject() ? obj.getAsJsonObject("metrics") : obj;
 
         Suggestion s = new Suggestion();
-        s.itemId = getInt(itemObj, "itemId", getInt(itemObj, "id", getInt(itemObj, "item_id", -1)));
+        s.itemId = pickPositive(
+                getInt(itemObj, "itemId", -1),
+                getInt(itemObj, "id", -1),
+                getInt(itemObj, "item_id", -1),
+                getInt(itemObj, "geItemId", -1),
+                getInt(itemObj, "ge_item_id", -1),
+                getInt(itemObj, "osrsId", -1),
+                getInt(itemObj, "osrs_id", -1),
+                getInt(obj, "itemId", -1),
+                getInt(obj, "id", -1),
+                getInt(obj, "item_id", -1),
+                getInt(obj, "geItemId", -1),
+                getInt(obj, "ge_item_id", -1),
+                getInt(obj, "osrsId", -1),
+                getInt(obj, "osrs_id", -1)
+        );
         if (s.itemId <= 0)
         {
             return null;
         }
 
         ItemComposition def = client.getItemDefinition(s.itemId);
-        s.name = getString(itemObj, "name", def != null ? def.getName() : ("Item " + s.itemId));
+        s.name = getString(itemObj, "name",
+                getString(itemObj, "itemName",
+                    getString(itemObj, "item_name",
+                        getString(obj, "name",
+                            getString(obj, "itemName", def != null ? def.getName() : ("Item " + s.itemId))))));
 
         int high = pickPositive(
                 getInt(obj, "high", -1),
@@ -740,22 +763,75 @@ public class Flipper0Plugin extends VitaPlugin
                 getInt(itemObj, "low", -1)
         );
 
-        s.buyPrice = low;
-        s.sellPrice = high;
+        int buyCandidate = pickPositive(
+                getInt(obj, "buyPrice", -1),
+                getInt(obj, "buy_price", -1),
+                getInt(pricesObj, "buyPrice", -1),
+                getInt(pricesObj, "buy_price", -1),
+                getInt(pricesObj, "buy", -1),
+                low
+        );
+
+        int sellCandidate = pickPositive(
+                getInt(obj, "sellPrice", -1),
+                getInt(obj, "sell_price", -1),
+                getInt(pricesObj, "sellPrice", -1),
+                getInt(pricesObj, "sell_price", -1),
+                getInt(pricesObj, "sell", -1),
+                high
+        );
+
+        s.buyPrice = buyCandidate;
+        s.sellPrice = sellCandidate;
+
+        if (s.buyPrice > 0 && s.sellPrice > 0 && s.sellPrice <= s.buyPrice && s.sellPrice != s.buyPrice)
+        {
+            int minPrice = Math.min(s.buyPrice, s.sellPrice);
+            int maxPrice = Math.max(s.buyPrice, s.sellPrice);
+            log.debug("Swapping inverted prices for itemId={} buy={} sell={}", s.itemId, s.buyPrice, s.sellPrice);
+            s.buyPrice = minPrice;
+            s.sellPrice = maxPrice;
+        }
+
+        int margin = pickPositive(
+                getInt(obj, "margin", -1),
+                getInt(obj, "marginGp", -1),
+                getInt(obj, "margin_gp", -1),
+                getInt(metricsObj, "margin", -1),
+                getInt(metricsObj, "marginGp", -1)
+        );
+        if (s.buyPrice > 0 && s.sellPrice > 0 && s.sellPrice <= s.buyPrice && margin > 0)
+        {
+            s.sellPrice = s.buyPrice + margin;
+        }
+
         s.minVolume = pickPositive(
                 getInt(obj, "minVolume", -1),
                 getInt(obj, "volume", -1),
                 getInt(obj, "volume_5m", -1),
+                getInt(obj, "volume5m", -1),
                 getInt(obj, "fiveMinuteVolume", -1),
                 getInt(obj, "min_volume", -1),
+                getInt(obj, "dailyVolume", -1),
+                getInt(obj, "volume1h", -1),
+                getInt(obj, "hourlyVolume", -1),
+                getInt(obj, "daily_volume", -1),
                 getInt(metricsObj, "minVolume", -1),
                 getInt(metricsObj, "volume", -1),
                 getInt(metricsObj, "volume_5m", -1),
+                getInt(metricsObj, "volume5m", -1),
+                getInt(metricsObj, "dailyVolume", -1),
+                getInt(metricsObj, "volume1h", -1),
+                getInt(metricsObj, "daily_volume", -1),
                 getInt(itemObj, "volume", -1),
                 0
         );
         s.geLimit = Math.max(1, pickPositive(
+                getInt(itemObj, "buyLimit", -1),
+                getInt(itemObj, "buy_limit", -1),
                 getInt(itemObj, "limit", -1),
+                getInt(obj, "buyLimit", -1),
+                getInt(obj, "buy_limit", -1),
                 getInt(obj, "geLimit", -1),
                 getInt(obj, "limit", -1),
                 70
@@ -770,6 +846,14 @@ public class Flipper0Plugin extends VitaPlugin
                 getDouble(obj, "opportunityScore", -1),
                 getDouble(metricsObj, "score", -1),
                 0.0
+        );
+
+        double roiRaw = pickPositiveDouble(
+                getDouble(obj, "roi", -1),
+                getDouble(obj, "roiPct", -1),
+                getDouble(obj, "roi_pct", -1),
+                getDouble(metricsObj, "roi", -1),
+                -1
         );
 
         s.ts = normalizeTimestamp(pickPositiveLong(
@@ -788,6 +872,11 @@ public class Flipper0Plugin extends VitaPlugin
         }
 
         s.roiPct = ((s.sellPrice - s.buyPrice) * 100.0) / Math.max(1, s.buyPrice);
+        if (roiRaw > 0)
+        {
+            s.roiPct = roiRaw <= 1.0 ? (roiRaw * 100.0) : roiRaw;
+        }
+
         if (s.score <= 0.0)
         {
             s.score = s.roiPct + (Math.log10(Math.max(1, s.minVolume)) * 1.8);
@@ -814,7 +903,7 @@ public class Flipper0Plugin extends VitaPlugin
         }
 
         JsonObject obj = root.getAsJsonObject();
-        String[] keys = {"suggestions", "data", "items", "results", "opportunities"};
+        String[] keys = {"suggestions", "data", "items", "results", "opportunities", "recommendations", "rows"};
         for (String key : keys)
         {
             if (!obj.has(key) || obj.get(key).isJsonNull())
@@ -863,7 +952,8 @@ public class Flipper0Plugin extends VitaPlugin
     private boolean looksLikeSuggestionObject(JsonObject obj)
     {
         return obj.has("item") || obj.has("itemId") || obj.has("id") || obj.has("buyPrice") || obj.has("sellPrice")
-                || obj.has("buy_price") || obj.has("sell_price") || obj.has("prices");
+                || obj.has("buy_price") || obj.has("sell_price") || obj.has("prices")
+                || obj.has("item_id") || obj.has("ge_item_id") || obj.has("geItemId") || obj.has("osrs_id");
     }
 
     private void dedupeByItemIdKeepBest(List<Suggestion> list)

@@ -20,10 +20,10 @@ public interface Flipper0Config extends Config
     default int coinReserve() { return 250_000; }
 
     @ConfigItem(keyName = "maxGpPerTrade", name = "Max GP per trade", description = "Maximum spend for a single item", position = 4)
-    default int maxGpPerTrade() { return 5_000_000; }
+    default int maxGpPerTrade() { return 100_000_000; }
 
     @ConfigItem(keyName = "minVolume", name = "Min volume", description = "Minimum volume required in API suggestion", position = 5)
-    default int minVolume() { return 25; }
+    default int minVolume() { return 10; }
 
     @ConfigItem(keyName = "maxDataAgeSeconds", name = "Max suggestion age (seconds)", description = "Ignore stale suggestions", position = 6)
     default int maxDataAgeSeconds() { return 240; }
