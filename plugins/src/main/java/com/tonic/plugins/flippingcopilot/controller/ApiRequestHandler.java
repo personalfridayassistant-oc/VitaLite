@@ -558,13 +558,17 @@ public class ApiRequestHandler {
         body.addProperty("include_graph_data", includeGraphData);
         log.debug("requesting price graph data for item {}", itemId);
         String jwtToken = copilotLoginRS.get().getJwtToken();
-        Request request = new Request.Builder()
+        Request.Builder requestBuilder = new Request.Builder()
                 .url(serverUrl +"/prices")
-                .addHeader("Authorization", "Bearer " + jwtToken)
                 .addHeader("Accept", "application/x-msgpack")
                 .addHeader("X-VERSION", "1")
-                .post(RequestBody.create(MediaType.get("application/json; charset=utf-8"), body.toString()))
-                .build();
+                .post(RequestBody.create(MediaType.get("application/json; charset=utf-8"), body.toString()));
+
+        if (jwtToken != null && !jwtToken.isBlank()) {
+            requestBuilder.addHeader("Authorization", "Bearer " + jwtToken);
+        }
+
+        Request request = requestBuilder.build();
 
         client.newBuilder()
                 .callTimeout(30, TimeUnit.SECONDS) // Overall timeout
