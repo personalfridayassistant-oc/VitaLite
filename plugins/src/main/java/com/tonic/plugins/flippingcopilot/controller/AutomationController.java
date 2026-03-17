@@ -3,10 +3,7 @@ package com.tonic.plugins.flippingcopilot.controller;
 import com.tonic.api.TClient;
 import com.tonic.plugins.flippingcopilot.config.FlippingCopilotConfig;
 import com.tonic.plugins.flippingcopilot.model.AccountStatus;
-<<<<<<< codex/implement-automatic-purchasing-and-selling-in-vitalite-api-wgjj02
 import com.tonic.plugins.flippingcopilot.model.AccountStatusManager;
-=======
->>>>>>> main
 import com.tonic.plugins.flippingcopilot.model.GEOfferScreenSetupOfferState;
 import com.tonic.plugins.flippingcopilot.model.Suggestion;
 import com.tonic.plugins.flippingcopilot.model.SuggestionManager;
