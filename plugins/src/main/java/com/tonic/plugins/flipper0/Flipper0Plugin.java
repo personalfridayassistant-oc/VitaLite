@@ -56,12 +56,7 @@ public class Flipper0Plugin extends VitaPlugin
 {
     private static final Logger log = LoggerFactory.getLogger(Flipper0Plugin.class);
 
-    private static final String[] SUGGESTION_ENDPOINTS = {
-            "http://192.168.1.27:3015/api/v1/suggestions/runelite?limit=200",
-            "http://192.168.1.27:3015/api/v1/suggestions?limit=200",
-            "http://192.168.1.27/api/v1/suggestions/runelite?limit=200"
-    };
-    private static final String HEALTH_ENDPOINT = "http://192.168.1.27:3015/api/v1/health";
+    private static final String DEFAULT_API_BASE = "http://192.168.1.27:3015/api/v1";
     private static final int MAX_REDIRECTS = 3;
     private static final int BUY_ATTEMPT_INTERVAL_SECONDS = 8;
     private static final int BUY_FAILURE_COOLDOWN_SECONDS = 15;
@@ -90,6 +85,8 @@ public class Flipper0Plugin extends VitaPlugin
     private NavigationButton navButton;
 
     private final Map<Integer, Instant> activeOfferSince = new HashMap<>();
+    private final Map<Integer, Integer> itemFailureCounts = new HashMap<>();
+    private final Map<Integer, Instant> itemCooldownUntil = new HashMap<>();
     private final Set<Integer> runtimeBlacklist = new HashSet<>();
     private final List<Suggestion> suggestions = new ArrayList<>();
 
@@ -135,6 +132,8 @@ public class Flipper0Plugin extends VitaPlugin
         runtimeBlacklist.clear();
         suggestions.clear();
         activeOfferSince.clear();
+        itemFailureCounts.clear();
+        itemCooldownUntil.clear();
         startedAt = Instant.now();
         lastFetch = Instant.EPOCH;
         skipCount = 0;
@@ -300,7 +299,7 @@ public class Flipper0Plugin extends VitaPlugin
 
         apiHealthy = isHealthEndpointUp();
         apiHealthText = apiHealthy ? "Up" : "Down";
-        log.debug("Health check {} -> {}", HEALTH_ENDPOINT, apiHealthText);
+        log.debug("Health check {} -> {}", buildEndpoint("health"), apiHealthText);
         lastHealthCheck = Instant.now();
     }
 
@@ -308,7 +307,7 @@ public class Flipper0Plugin extends VitaPlugin
     {
         try
         {
-            URL url = new URL(HEALTH_ENDPOINT);
+            URL url = new URL(buildEndpoint("health"));
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("GET");
             conn.setRequestProperty("Accept", "application/json");
@@ -363,6 +362,15 @@ public class Flipper0Plugin extends VitaPlugin
                 stats.untradeable++;
                 continue;
             }
+            if (s.score < config.minScore())
+            {
+                continue;
+            }
+            Instant cooldownUntil = itemCooldownUntil.get(s.itemId);
+            if (cooldownUntil != null && Instant.now().isBefore(cooldownUntil))
+            {
+                continue;
+            }
 
             int effectiveBudget = Math.min(spendable, maxTradeBudget);
             if (effectiveBudget < s.buyPrice)
@@ -402,7 +410,7 @@ public class Flipper0Plugin extends VitaPlugin
             return false;
         }
 
-        int price = Math.max(suggestion.buyPrice + 1, suggestion.sellPrice);
+        int price = resolveSellPrice(suggestion, qty);
         clearNumericDialogue();
         boolean ok = GrandExchangeAPI.startSellOffer(suggestion.itemId, qty, price) != null;
         clearNumericDialogue();
@@ -467,7 +475,8 @@ public class Flipper0Plugin extends VitaPlugin
         nextBuyAttemptAt = Instant.now().plusSeconds(BUY_ATTEMPT_INTERVAL_SECONDS);
 
         int spendable = Math.max(0, coinsOnHand() - config.coinReserve());
-        int budget = Math.min(Math.max(1, config.maxGpPerTrade()), spendable);
+        int pctBudget = (int) ((long) spendable * Math.max(1, Math.min(100, config.maxBankPctPerTrade())) / 100L);
+        int budget = Math.min(Math.max(1, config.maxGpPerTrade()), Math.max(1, pctBudget));
         int qty = Math.min(Math.max(1, suggestion.geLimit), budget / Math.max(1, suggestion.buyPrice));
         if (qty <= 0)
         {
@@ -483,16 +492,83 @@ public class Flipper0Plugin extends VitaPlugin
         if (ok)
         {
             activeOfferSince.put(suggestion.itemId, Instant.now());
+            itemFailureCounts.remove(suggestion.itemId);
             nextBuyAttemptAt = Instant.EPOCH;
-            statusText = "Placed buy for " + suggestion.name + " x" + qty;
+            skipCount++;
+            statusText = "Placed buy for " + suggestion.name + " x" + qty + " (cycling next)";
             log.info("Placed buy offer item={} name={} qty={} price={}", suggestion.itemId, suggestion.name, qty, suggestion.buyPrice);
             return true;
         }
 
         nextBuyAttemptAt = Instant.now().plusSeconds(BUY_FAILURE_COOLDOWN_SECONDS);
+        registerItemFailure(suggestion, "buy failed");
         statusText = "Buy failed for " + suggestion.name + " (cooldown " + BUY_FAILURE_COOLDOWN_SECONDS + "s)";
         log.warn("Failed placing buy offer item={} name={} qty={} price={}; backing off until {}", suggestion.itemId, suggestion.name, qty, suggestion.buyPrice, nextBuyAttemptAt);
         return false;
+    }
+
+    private int resolveSellPrice(Suggestion suggestion, int qty)
+    {
+        int direct = Math.max(suggestion.buyPrice + 1, suggestion.sellPrice);
+        if (direct > suggestion.buyPrice)
+        {
+            return direct;
+        }
+
+        Suggestion refreshed = fetchItemPricingSuggestion(suggestion.itemId);
+        if (refreshed != null && refreshed.sellPrice > refreshed.buyPrice)
+        {
+            suggestion.sellPrice = refreshed.sellPrice;
+            suggestion.buyPrice = Math.max(1, refreshed.buyPrice);
+            suggestion.name = refreshed.name;
+            return Math.max(suggestion.buyPrice + 1, suggestion.sellPrice);
+        }
+
+        int floor = Math.max(1, suggestion.buyPrice + Math.max(1, suggestion.buyPrice / 100));
+        log.info("Using fallback sell price for itemId={} qty={} floor={}", suggestion.itemId, qty, floor);
+        return floor;
+    }
+
+    private Suggestion fetchItemPricingSuggestion(int itemId)
+    {
+        try
+        {
+            URL url = new URL(buildEndpoint("items/" + itemId));
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("GET");
+            conn.setRequestProperty("Accept", "application/json");
+            conn.setConnectTimeout(2500);
+            conn.setReadTimeout(4000);
+            if (conn.getResponseCode() < 200 || conn.getResponseCode() >= 300)
+            {
+                return null;
+            }
+
+            StringBuilder sb = new StringBuilder();
+            try (BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8)))
+            {
+                String line;
+                while ((line = br.readLine()) != null)
+                {
+                    sb.append(line);
+                }
+            }
+
+            JsonElement root = JsonParser.parseString(sb.toString());
+            if (root == null || root.isJsonNull())
+            {
+                return null;
+            }
+            if (root.isJsonObject())
+            {
+                return parseSuggestionElement(root.getAsJsonObject());
+            }
+        }
+        catch (Exception ex)
+        {
+            log.debug("Item pricing lookup failed for itemId={}: {}", itemId, ex.getMessage());
+        }
+        return null;
     }
 
     private boolean isTradeableForAccount(int itemId, boolean memberWorld)
@@ -548,6 +624,7 @@ public class Flipper0Plugin extends VitaPlugin
                 log.info("Cancelled stale offer item={} state={} ageSec={}", offer.getItemId(), offer.getState(), Duration.between(started, now).getSeconds());
                 clearNumericDialogue();
                 activeOfferSince.put(offer.getItemId(), now);
+                registerItemFailure(findSuggestionByItemId(offer.getItemId()), "stale offer");
                 statusText = "Cancelled stale offer " + offer.getItemId();
             }
         }
@@ -654,7 +731,7 @@ public class Flipper0Plugin extends VitaPlugin
         List<Suggestion> out = new ArrayList<>();
         List<String> endpointDebug = new ArrayList<>();
 
-        for (String endpoint : SUGGESTION_ENDPOINTS)
+        for (String endpoint : suggestionEndpoints())
         {
             String endpointWithFilters = applyMembersFilter(endpoint);
             List<Suggestion> parsed = fetchSuggestionsFromEndpoint(endpointWithFilters, endpointDebug, 0);
@@ -662,7 +739,6 @@ public class Flipper0Plugin extends VitaPlugin
             {
                 out.addAll(parsed);
                 lastSuggestionDebug = String.join(" | ", endpointDebug);
-                break;
             }
         }
 
@@ -673,6 +749,39 @@ public class Flipper0Plugin extends VitaPlugin
 
         dedupeByItemIdKeepBest(out);
         return out;
+    }
+
+    private List<String> suggestionEndpoints()
+    {
+        String base = apiBaseUrl();
+        List<String> endpoints = new ArrayList<>();
+        endpoints.add(base + "/suggestions/runelite?limit=25");
+        endpoints.add(base + "/suggestions?limit=220");
+        endpoints.add(base + "/backtests?horizonMinutes=" + Math.max(5, config.horizonMinutes())
+                + "&minScore=" + config.minScore()
+                + "&lookbackHours=" + Math.max(1, config.lookbackHours())
+                + "&limit=100");
+        return endpoints;
+    }
+
+    private String apiBaseUrl()
+    {
+        String configured = config.apiBaseUrl();
+        if (configured == null || configured.trim().isEmpty())
+        {
+            return DEFAULT_API_BASE;
+        }
+        String out = configured.trim();
+        while (out.endsWith("/"))
+        {
+            out = out.substring(0, out.length() - 1);
+        }
+        return out;
+    }
+
+    private String buildEndpoint(String path)
+    {
+        return apiBaseUrl() + "/" + path;
     }
 
     private String applyMembersFilter(String endpoint)
@@ -1166,6 +1275,36 @@ public class Flipper0Plugin extends VitaPlugin
             }
         }
         return set;
+    }
+
+    private void registerItemFailure(Suggestion suggestion, String reason)
+    {
+        if (suggestion == null)
+        {
+            return;
+        }
+
+        int failures = itemFailureCounts.getOrDefault(suggestion.itemId, 0) + 1;
+        itemFailureCounts.put(suggestion.itemId, failures);
+        if (failures >= Math.max(1, config.cycleAfterAttempts()))
+        {
+            itemCooldownUntil.put(suggestion.itemId, Instant.now().plusSeconds(Math.max(20, config.staleOfferSeconds())));
+            skipCount++;
+            itemFailureCounts.put(suggestion.itemId, 0);
+            log.info("Cycling {} after {} failures ({})", suggestion.name, failures, reason);
+        }
+    }
+
+    private Suggestion findSuggestionByItemId(int itemId)
+    {
+        for (Suggestion suggestion : suggestions)
+        {
+            if (suggestion != null && suggestion.itemId == itemId)
+            {
+                return suggestion;
+            }
+        }
+        return null;
     }
 
     private void refreshPanel()
