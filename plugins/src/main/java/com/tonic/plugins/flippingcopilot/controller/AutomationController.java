@@ -12,8 +12,6 @@ import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
 import net.runelite.api.GrandExchangeOffer;
 import net.runelite.api.GrandExchangeOfferState;
-import net.runelite.api.GrandExchangeOffer;
-import net.runelite.api.GrandExchangeOfferState;
 
 import javax.inject.Inject;
 import javax.inject.Singleton;
@@ -35,7 +33,6 @@ public class AutomationController {
     private long lastActionAt = 0L;
     private int lastInputPromptTick = -1;
     private PendingOffer pendingOffer;
-    private int lastInputPromptTick = -1;
 
     public void onGameTick() {
         if (!config.enableAutomation() || !grandExchange.isOpen()) {
