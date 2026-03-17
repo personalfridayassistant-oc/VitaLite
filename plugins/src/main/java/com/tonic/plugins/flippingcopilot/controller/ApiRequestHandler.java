@@ -294,8 +294,13 @@ public class ApiRequestHandler {
         int buyPrice = readInt(selected, "buy_price",
                 readInt(selected, "latestLow", readInt(selected, "buy", 0)));
         int apiLimit = readInt(selected, "limit", 10_000);
+        int apiSuggestedQuantity = readInt(selected, "quantity",
+                readInt(selected, "suggested_quantity",
+                        readInt(selected, "buy_quantity", -1)));
         int maxQuantityFromCoins = (int) Math.min(availableCoins / Math.max(buyPrice, 1), 10_000);
-        int quantity = Math.max(1, apiLimit > 0 ? Math.min(maxQuantityFromCoins, apiLimit) : maxQuantityFromCoins);
+        int quantityCap = apiLimit > 0 ? Math.min(maxQuantityFromCoins, apiLimit) : maxQuantityFromCoins;
+        int quantity = apiSuggestedQuantity > 0 ? Math.min(apiSuggestedQuantity, quantityCap) : quantityCap;
+        quantity = Math.max(1, quantity);
         int sellPrice = readInt(selected, "sell_price",
                 readInt(selected, "latestHigh", readInt(selected, "sell", buyPrice)));
         double expectedProfit = Math.max(0, (sellPrice - buyPrice) * (double) quantity);
@@ -549,6 +554,14 @@ public class ApiRequestHandler {
     }
 
     public void asyncGetItemPriceWithGraphData(int itemId, String displayName, Consumer<ItemPrice> consumer, boolean includeGraphData) {
+        asyncGetItemPriceWithGraphData(itemId, displayName, String.valueOf(itemId), consumer, includeGraphData);
+    }
+
+    public void asyncGetItemPriceWithGraphData(int itemId,
+                                               String displayName,
+                                               String itemQuery,
+                                               Consumer<ItemPrice> consumer,
+                                               boolean includeGraphData) {
         JsonObject body = new JsonObject();
         body.add("item_id", new JsonPrimitive(itemId));
         body.add("display_name", new JsonPrimitive(displayName));
@@ -578,16 +591,14 @@ public class ApiRequestHandler {
             @Override
             public void onFailure(Call call, IOException e) {
                 log.error("error fetching copilot price for item {}", itemId, e);
-                ItemPrice ip = new ItemPrice(0, 0, DEFAULT_COPILOT_PRICE_ERROR_MESSAGE, null);
-                clientThread.invoke(() -> consumer.accept(ip));
+                asyncFallbackItemPrice(itemId, itemQuery, consumer);
             }
             @Override
             public void onResponse(Call call, Response response) {
                 try {
                     if (!response.isSuccessful()) {
                         log.error("get copilot price for item {} failed with http status code {}", itemId, response.code());
-                        ItemPrice ip = new ItemPrice(0, 0, DEFAULT_COPILOT_PRICE_ERROR_MESSAGE, null);
-                        clientThread.invoke(() -> consumer.accept(ip));
+                        asyncFallbackItemPrice(itemId, itemQuery, consumer);
                     } else {
                         byte[] d = response.body().bytes();
                         ItemPrice ip = ItemPrice.fromMsgPack(ByteBuffer.wrap(d));
@@ -596,11 +607,79 @@ public class ApiRequestHandler {
                     }
                 } catch (Exception e) {
                     log.error("error fetching copilot price for item {}", itemId, e);
+                    asyncFallbackItemPrice(itemId, itemQuery, consumer);
+                }
+            }
+        });
+    }
+
+    private void asyncFallbackItemPrice(int itemId, String itemQuery, Consumer<ItemPrice> consumer) {
+        String query = (itemQuery == null || itemQuery.isBlank()) ? String.valueOf(itemId) : itemQuery;
+        String encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8);
+        String url = serverUrl + "/api/v1/items/search?q=" + encodedQuery;
+        Request request = new Request.Builder()
+                .url(url)
+                .addHeader("Accept", "application/json")
+                .get()
+                .build();
+
+        localSuggestionClient.newCall(request).enqueue(new Callback() {
+            @Override
+            public void onFailure(Call call, IOException e) {
+                log.error("fallback item search failed for {}", query, e);
+                ItemPrice ip = new ItemPrice(0, 0, DEFAULT_COPILOT_PRICE_ERROR_MESSAGE, null);
+                clientThread.invoke(() -> consumer.accept(ip));
+            }
+
+            @Override
+            public void onResponse(Call call, Response response) {
+                try {
+                    if (!response.isSuccessful() || response.body() == null) {
+                        ItemPrice ip = new ItemPrice(0, 0, DEFAULT_COPILOT_PRICE_ERROR_MESSAGE, null);
+                        clientThread.invoke(() -> consumer.accept(ip));
+                        return;
+                    }
+
+                    JsonElement parsed = JsonParser.parseString(response.body().string());
+                    JsonObject bestMatch = extractBestSearchMatch(parsed, itemId);
+                    if (bestMatch == null) {
+                        ItemPrice ip = new ItemPrice(0, 0, "No item pricing returned from API.", null);
+                        clientThread.invoke(() -> consumer.accept(ip));
+                        return;
+                    }
+
+                    int buyPrice = readInt(bestMatch, "buy_price",
+                            readInt(bestMatch, "latestLow", readInt(bestMatch, "buy", 0)));
+                    int sellPrice = readInt(bestMatch, "sell_price",
+                            readInt(bestMatch, "latestHigh", readInt(bestMatch, "sell", 0)));
+                    ItemPrice ip = new ItemPrice(sellPrice, buyPrice, null, null);
+                    clientThread.invoke(() -> consumer.accept(ip));
+                } catch (Exception e) {
+                    log.error("failed parsing fallback item search response for {}", query, e);
                     ItemPrice ip = new ItemPrice(0, 0, DEFAULT_COPILOT_PRICE_ERROR_MESSAGE, null);
                     clientThread.invoke(() -> consumer.accept(ip));
                 }
             }
         });
+    }
+
+    private JsonObject extractBestSearchMatch(JsonElement parsed, int itemId) {
+        JsonArray arr = extractSuggestionsArray(parsed);
+        JsonObject first = null;
+        for (JsonElement e : arr) {
+            if (!e.isJsonObject()) {
+                continue;
+            }
+            JsonObject item = e.getAsJsonObject();
+            if (first == null) {
+                first = item;
+            }
+            int id = readInt(item, "item_id", readInt(item, "itemId", -1));
+            if (id == itemId) {
+                return item;
+            }
+        }
+        return first;
     }
 
 

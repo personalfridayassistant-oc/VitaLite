@@ -89,9 +89,8 @@ public class OfferHandler {
                     }
                 });
             };
-
-
-            apiRequestHandler.asyncGetItemPriceWithGraphData(currentItemId, osrsLoginManager.getPlayerDisplayName(), itemPriceConsumer, false);
+            String itemName = client.getItemDefinition(currentItemId).getName();
+            apiRequestHandler.asyncGetItemPriceWithGraphData(currentItemId, osrsLoginManager.getPlayerDisplayName(), itemName, itemPriceConsumer, false);
 
         } else {
             offerManager.setViewedSlotItemPrice(-1);
