@@ -1,7 +1,6 @@
 package com.tonic.plugins.flippingcopilot.controller;
 
 import com.tonic.plugins.flippingcopilot.model.*;
-import com.tonic.plugins.flippingcopilot.rs.CopilotLoginRS;
 import com.tonic.plugins.flippingcopilot.ui.OfferEditor;
 import lombok.Getter;
 import lombok.RequiredArgsConstructor;
@@ -38,7 +37,6 @@ public class OfferHandler {
     private final OsrsLoginManager osrsLoginManager;
     private final OfferManager offerManager;
     private final HighlightController highlightController;
-    private final CopilotLoginRS copilotLoginRS;
 
     // state
     private String viewedSlotPriceErrorText = null;
@@ -59,11 +57,7 @@ public class OfferHandler {
                 return;
             }
 
-            if (!copilotLoginRS.get().isLoggedIn()) {
-                viewedSlotPriceErrorText = "Login to copilot to see item price.";
-                return;
-            }
-            viewedSlotPriceErrorText = "Loading copilot item price..";
+            viewedSlotPriceErrorText = "Loading item price..";
             Consumer<ItemPrice> itemPriceConsumer = (fetchedPrice) -> {
                 clientThread.invoke(() -> {
                     if (fetchedPrice == null) {
