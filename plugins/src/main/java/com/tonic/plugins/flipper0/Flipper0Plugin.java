@@ -106,6 +106,7 @@ public class Flipper0Plugin extends VitaPlugin
     private String apiHealthText = "Unknown";
     private boolean apiHealthy;
     private String lastSuggestionDebug = "No fetch yet";
+    private Instant nextBuyAttemptAt = Instant.EPOCH;
 
     private static class FilterStats
     {
@@ -142,6 +143,7 @@ public class Flipper0Plugin extends VitaPlugin
         apiHealthy = false;
         apiHealthText = "Unknown";
         lastSuggestionDebug = "No fetch yet";
+        nextBuyAttemptAt = Instant.EPOCH;
 
         overlayManager.add(overlay);
         BufferedImage icon = ImageUtil.loadImageResource(getClass(), "/graph.png");
@@ -225,7 +227,15 @@ public class Flipper0Plugin extends VitaPlugin
         boolean bought = false;
         if (getFreeEligibleSlots() > 0)
         {
-            bought = tryBuySuggestion(currentSuggestion);
+            if (Instant.now().isBefore(nextBuyAttemptAt))
+            {
+                long waitSec = Math.max(1, Duration.between(Instant.now(), nextBuyAttemptAt).getSeconds());
+                statusText = "Waiting before next buy attempt (" + waitSec + "s)";
+            }
+            else
+            {
+                bought = tryBuySuggestion(currentSuggestion);
+            }
         }
         else if (!sold)
         {
@@ -422,6 +432,7 @@ public class Flipper0Plugin extends VitaPlugin
         int qty = Math.min(Math.max(1, suggestion.geLimit), budget / Math.max(1, suggestion.buyPrice));
         if (qty <= 0)
         {
+            nextBuyAttemptAt = Instant.now().plusSeconds(3);
             statusText = "Not enough coins for " + suggestion.name;
             return false;
         }
@@ -433,13 +444,15 @@ public class Flipper0Plugin extends VitaPlugin
         if (ok)
         {
             activeOfferSince.put(suggestion.itemId, Instant.now());
+            nextBuyAttemptAt = Instant.EPOCH;
             statusText = "Placed buy for " + suggestion.name + " x" + qty;
             log.info("Placed buy offer item={} name={} qty={} price={}", suggestion.itemId, suggestion.name, qty, suggestion.buyPrice);
             return true;
         }
 
-        statusText = "Buy failed for " + suggestion.name;
-        log.warn("Failed placing buy offer item={} name={} qty={} price={}", suggestion.itemId, suggestion.name, qty, suggestion.buyPrice);
+        nextBuyAttemptAt = Instant.now().plusSeconds(5);
+        statusText = "Buy failed for " + suggestion.name + " (cooldown 5s)";
+        log.warn("Failed placing buy offer item={} name={} qty={} price={}; backing off until {}", suggestion.itemId, suggestion.name, qty, suggestion.buyPrice, nextBuyAttemptAt);
         return false;
     }
 
