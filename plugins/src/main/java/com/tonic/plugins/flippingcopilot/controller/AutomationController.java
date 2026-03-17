@@ -9,8 +9,11 @@ import com.tonic.plugins.flippingcopilot.model.SuggestionManager;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
+<<<<<<< codex/implement-automatic-purchasing-and-selling-in-vitalite-api-8x6yqy
 import net.runelite.api.GrandExchangeOffer;
 import net.runelite.api.GrandExchangeOfferState;
+=======
+>>>>>>> main
 
 import javax.inject.Inject;
 import javax.inject.Singleton;
@@ -30,7 +33,10 @@ public class AutomationController {
     private final Client client;
 
     private long lastActionAt = 0L;
+<<<<<<< codex/implement-automatic-purchasing-and-selling-in-vitalite-api-8x6yqy
     private int lastInputPromptTick = -1;
+=======
+>>>>>>> main
 
     public void onGameTick() {
         if (!config.enableAutomation() || !grandExchange.isOpen()) {
@@ -50,14 +56,20 @@ public class AutomationController {
             return;
         }
 
+<<<<<<< codex/implement-automatic-purchasing-and-selling-in-vitalite-api-8x6yqy
         if ((hasCollectableOffers() || accountStatus.isCollectNeeded(suggestion, grandExchange.isSetupOfferOpen()))
                 && GrandExchangeAPI.canCollect()) {
             GrandExchangeAPI.collectAll();
             suggestionManager.setSuggestionNeeded(true);
+=======
+        if (accountStatus.isCollectNeeded(suggestion, grandExchange.isSetupOfferOpen()) && GrandExchangeAPI.canCollect()) {
+            GrandExchangeAPI.collectAll();
+>>>>>>> main
             markAction("collect", suggestion);
             return;
         }
 
+<<<<<<< codex/implement-automatic-purchasing-and-selling-in-vitalite-api-8x6yqy
         if (handleOfferInputPrompt(suggestion)) {
             return;
         }
@@ -67,12 +79,29 @@ public class AutomationController {
         }
 
         if (!accountStatus.emptySlotExists()) {
+=======
+        if (!grandExchange.isHomeScreenOpen()) {
+            return;
+        }
+
+        if (!accountStatus.emptySlotExists()) {
+            return;
+        }
+
+        if (offerHandler.isSettingPrice() || offerHandler.isSettingQuantity()) {
+            offerHandler.setSuggestedAction(suggestion);
+            client.runScript(138);
+            markAction("set-offer-input", suggestion);
+>>>>>>> main
             return;
         }
 
         if (suggestion.isBuySuggestion() && !accountStatus.isCollectNeeded(suggestion, false)) {
             if (GrandExchangeAPI.startBuyOffer(suggestion.getItemId(), suggestion.getQuantity(), suggestion.getPrice()) != null) {
+<<<<<<< codex/implement-automatic-purchasing-and-selling-in-vitalite-api-8x6yqy
                 markSuggestionActioned(suggestion);
+=======
+>>>>>>> main
                 markAction("start-buy", suggestion);
             }
             return;
@@ -80,12 +109,16 @@ public class AutomationController {
 
         if (suggestion.isSellSuggestion() && !accountStatus.isCollectNeeded(suggestion, false)) {
             if (GrandExchangeAPI.startSellOffer(suggestion.getItemId(), suggestion.getQuantity(), suggestion.getPrice()) != null) {
+<<<<<<< codex/implement-automatic-purchasing-and-selling-in-vitalite-api-8x6yqy
                 markSuggestionActioned(suggestion);
+=======
+>>>>>>> main
                 markAction("start-sell", suggestion);
             }
         }
     }
 
+<<<<<<< codex/implement-automatic-purchasing-and-selling-in-vitalite-api-8x6yqy
     private boolean hasCollectableOffers() {
         GrandExchangeOffer[] offers = client.getGrandExchangeOffers();
         if (offers == null) {
@@ -131,6 +164,8 @@ public class AutomationController {
         suggestionManager.setSuggestionNeeded(true);
     }
 
+=======
+>>>>>>> main
     private void markAction(String action, Suggestion suggestion) {
         lastActionAt = System.currentTimeMillis();
         log.debug("automation action {} for suggestion {} {}", action, suggestion.getType(), suggestion.getItemId());
