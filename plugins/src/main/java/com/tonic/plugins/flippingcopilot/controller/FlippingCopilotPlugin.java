@@ -69,6 +69,8 @@ public class FlippingCopilotPlugin extends Plugin {
 	@Inject
 	private SuggestionController suggestionController;
 	@Inject
+	private AutomationController automationController;
+	@Inject
 	private SuggestionManager suggestionManager;
 	@Inject
 	private WebHookController webHookController;
@@ -220,6 +222,7 @@ public class FlippingCopilotPlugin extends Plugin {
 	@Subscribe
 	public void onGameTick(GameTick event) {
 		suggestionController.onGameTick();
+		automationController.onGameTick();
 		offerEventHandler.onGameTick();
 		grandExchangeOpenRS.set(grandExchange.isOpen());
 		osrsLoginRS.set(osrsLoginRS.get().nextState(client));
