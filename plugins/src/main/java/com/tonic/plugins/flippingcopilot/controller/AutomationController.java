@@ -1,18 +1,14 @@
 package com.tonic.plugins.flippingcopilot.controller;
 
-import com.tonic.api.TClient;
+import com.tonic.api.widgets.GrandExchangeAPI;
 import com.tonic.plugins.flippingcopilot.config.FlippingCopilotConfig;
 import com.tonic.plugins.flippingcopilot.model.AccountStatus;
 import com.tonic.plugins.flippingcopilot.model.AccountStatusManager;
-import com.tonic.plugins.flippingcopilot.model.GEOfferScreenSetupOfferState;
 import com.tonic.plugins.flippingcopilot.model.Suggestion;
 import com.tonic.plugins.flippingcopilot.model.SuggestionManager;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
-import net.runelite.api.ItemComposition;
-import net.runelite.api.MenuAction;
-import net.runelite.api.widgets.Widget;
 
 import javax.inject.Inject;
 import javax.inject.Singleton;
@@ -46,6 +42,25 @@ public class AutomationController {
             return;
         }
 
+        AccountStatus accountStatus = accountStatusManager.getAccountStatus();
+        if (accountStatus == null) {
+            return;
+        }
+
+        if (accountStatus.isCollectNeeded(suggestion, grandExchange.isSetupOfferOpen()) && GrandExchangeAPI.canCollect()) {
+            GrandExchangeAPI.collectAll();
+            markAction("collect", suggestion);
+            return;
+        }
+
+        if (!grandExchange.isHomeScreenOpen()) {
+            return;
+        }
+
+        if (!accountStatus.emptySlotExists()) {
+            return;
+        }
+
         if (offerHandler.isSettingPrice() || offerHandler.isSettingQuantity()) {
             offerHandler.setSuggestedAction(suggestion);
             client.runScript(138);
@@ -53,98 +68,18 @@ public class AutomationController {
             return;
         }
 
-        if (grandExchange.isHomeScreenOpen()) {
-            actionHomeScreen(suggestion);
-            return;
-        }
-
-        if (grandExchange.isSetupOfferOpen()) {
-            GEOfferScreenSetupOfferState setupState = grandExchange.getOfferScreenSetupOfferState();
-            if (setupState != null && setupState.offerDetailsCorrect(suggestion)) {
-                clickWidget(grandExchange.getConfirmButton(), "Confirm");
-                markAction("confirm-offer", suggestion);
+        if (suggestion.isBuySuggestion() && !accountStatus.isCollectNeeded(suggestion, false)) {
+            if (GrandExchangeAPI.startBuyOffer(suggestion.getItemId(), suggestion.getQuantity(), suggestion.getPrice()) != null) {
+                markAction("start-buy", suggestion);
             }
-        }
-    }
-
-    private void actionHomeScreen(Suggestion suggestion) {
-        AccountStatus accountStatus = accountStatusManager.getAccountStatus();
-        if (accountStatus == null) {
             return;
         }
 
-        if (accountStatus.isCollectNeeded(suggestion, false) && grandExchange.isCollectButtonVisible()) {
-            clickWidget(grandExchange.getCollectButton(), "Collect");
-            markAction("collect", suggestion);
-            return;
-        }
-
-        if (suggestion.isBuySuggestion() && accountStatus.emptySlotExists()) {
-            clickWidget(grandExchange.getBuyButton(accountStatus.findEmptySlot()), "Buy");
-            markAction("start-buy", suggestion);
-            return;
-        }
-
-        if (suggestion.isSellSuggestion()) {
-            Widget itemWidget = getInventoryItemWidget(suggestion.getItemId());
-            if (itemWidget != null) {
-                clickWidget(itemWidget, "Offer");
+        if (suggestion.isSellSuggestion() && !accountStatus.isCollectNeeded(suggestion, false)) {
+            if (GrandExchangeAPI.startSellOffer(suggestion.getItemId(), suggestion.getQuantity(), suggestion.getPrice()) != null) {
                 markAction("start-sell", suggestion);
             }
         }
-    }
-
-    private void clickWidget(Widget widget, String preferredOption) {
-        if (!(client instanceof TClient) || widget == null || widget.isHidden()) {
-            return;
-        }
-        int identifier = resolveActionIdentifier(widget, preferredOption);
-        ((TClient) client).invokeMenuAction(
-                preferredOption,
-                "",
-                identifier,
-                MenuAction.CC_OP.getId(),
-                -1,
-                widget.getId(),
-                -1,
-                -1,
-                -1
-        );
-    }
-
-    private int resolveActionIdentifier(Widget widget, String preferredOption) {
-        String[] actions = widget.getActions();
-        if (actions == null) {
-            return 1;
-        }
-        for (int i = 0; i < actions.length; i++) {
-            if (actions[i] != null && actions[i].equalsIgnoreCase(preferredOption)) {
-                return i + 1;
-            }
-        }
-        return 1;
-    }
-
-    private Widget getInventoryItemWidget(int unnotedItemId) {
-        Widget inventory = client.getWidget(467, 0);
-        if (inventory == null) {
-            inventory = client.getWidget(149, 0);
-            if (inventory == null) {
-                return null;
-            }
-        }
-
-        for (Widget widget : inventory.getDynamicChildren()) {
-            int itemId = widget.getItemId();
-            ItemComposition itemComposition = client.getItemDefinition(itemId);
-            if (itemComposition.getNote() != -1 && itemComposition.getLinkedNoteId() == unnotedItemId) {
-                return widget;
-            }
-            if (itemId == unnotedItemId) {
-                return widget;
-            }
-        }
-        return null;
     }
 
     private void markAction(String action, Suggestion suggestion) {
