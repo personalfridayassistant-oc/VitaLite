@@ -127,6 +127,18 @@ public interface FlippingCopilotConfig extends Config
         return new Keybind(KeyEvent.VK_E, 0);
     }
 
+    @ConfigItem(
+            keyName = "enableAutomation",
+            name = "Enable VitaLite automation",
+            description = "Automatically action suggestions by setting offer values and confirming buy/sell offers.",
+            section = offerSetupSection,
+            position = 4
+    )
+    default boolean enableAutomation()
+    {
+        return true;
+    }
+
     @ConfigSection(
             name = "Appearance",
             description = "Configure visual appearance and colors",
