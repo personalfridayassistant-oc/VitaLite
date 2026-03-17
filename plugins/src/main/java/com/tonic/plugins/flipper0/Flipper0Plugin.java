@@ -353,7 +353,7 @@ public class Flipper0Plugin extends VitaPlugin
                 stats.stale++;
                 continue;
             }
-            if (!memberWorld && s.members)
+            if ((!memberWorld || config.f2pOnly()) && s.members)
             {
                 stats.membersBlocked++;
                 continue;
@@ -656,7 +656,8 @@ public class Flipper0Plugin extends VitaPlugin
 
         for (String endpoint : SUGGESTION_ENDPOINTS)
         {
-            List<Suggestion> parsed = fetchSuggestionsFromEndpoint(endpoint, endpointDebug, 0);
+            String endpointWithFilters = applyMembersFilter(endpoint);
+            List<Suggestion> parsed = fetchSuggestionsFromEndpoint(endpointWithFilters, endpointDebug, 0);
             if (!parsed.isEmpty())
             {
                 out.addAll(parsed);
@@ -672,6 +673,22 @@ public class Flipper0Plugin extends VitaPlugin
 
         dedupeByItemIdKeepBest(out);
         return out;
+    }
+
+    private String applyMembersFilter(String endpoint)
+    {
+        if (!config.f2pOnly())
+        {
+            return endpoint;
+        }
+
+        if (endpoint.contains("membersOnly="))
+        {
+            return endpoint.replaceAll("membersOnly=[^&]*", "membersOnly=false");
+        }
+
+        String sep = endpoint.contains("?") ? "&" : "?";
+        return endpoint + sep + "membersOnly=false";
     }
 
     private List<Suggestion> fetchSuggestionsFromEndpoint(String endpoint, List<String> endpointDebug, int redirectDepth)

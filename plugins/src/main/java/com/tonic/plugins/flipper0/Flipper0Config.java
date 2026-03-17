@@ -35,12 +35,16 @@ public interface Flipper0Config extends Config
     default int loopDelayTicks() { return 1; }
 
 
-    @ConfigItem(keyName = "showOverlay", name = "Show overlay", description = "Show Flipper0 in-game overlay", position = 9)
+
+    @ConfigItem(keyName = "f2pOnly", name = "F2P-only suggestions", description = "Only fetch and trade free-to-play (non-members) items", position = 9)
+    default boolean f2pOnly() { return false; }
+
+    @ConfigItem(keyName = "showOverlay", name = "Show overlay", description = "Show Flipper0 in-game overlay", position = 10)
     default boolean showOverlay() { return true; }
 
-    @ConfigItem(keyName = "overlayOffsetY", name = "Overlay offset Y", description = "Vertical offset for Flipper0 overlay", position = 10)
+    @ConfigItem(keyName = "overlayOffsetY", name = "Overlay offset Y", description = "Vertical offset for Flipper0 overlay", position = 11)
     default int overlayOffsetY() { return 40; }
 
-    @ConfigItem(keyName = "blacklistItemIds", name = "Blacklist item IDs", description = "CSV item IDs to always skip", position = 11)
+    @ConfigItem(keyName = "blacklistItemIds", name = "Blacklist item IDs", description = "CSV item IDs to always skip", position = 12)
     default String blacklistItemIds() { return ""; }
 }
